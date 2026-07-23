@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "../yggdns64"
+		},
+		{
+			"path": "."
+		},
+		{
+			"path": "../yggdrasil-go"
+		},
+		{
+			"path": "../yggstack"
+		}
+	],
+	"settings": {}
+}

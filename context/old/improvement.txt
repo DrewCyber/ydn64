@@ -1,0 +1,50 @@
+If we don't have any dns64 section with "." domain filter and request is not matched to any filters we should return NXDOMAIN.
+If we have "200::/7" as AAAA dns response, we just return it as a response without any modifications.
+
+Additional for the main yggdrasil config sections below:
+
+```
+[nat64]                             # create separate section for nat64
+enable = true                       # enable / disable nat64 service
+pool6 = "301:363a:9499:c858::/96"   # subnet for nat64 pool. Gathered from current node ip address.
+allowed_nat64_sources = []
+
+[dns64]                             # separate section for dns64
+enable = false                      # false by default
+listen: "[200:c771:1561:ed81::1]:53"    # The address and port to bind to. By default yggdrasil node ip here, but could be changed to 300 subnet address.
+allowed_dns64_sources = []
+default: 8.8.8.8:53                 # (mandatory) default forwarder for the requests
+cache_expiration: 300               # expire dns cache in 300 sec
+cache_purge: 600                    # purge dns cache in 600 sec
+invalid-address: ignore             # What to do with an "0.0.0.0" and [::] addresses
+#   "ignore"  - treated like a regular address (i.e. 0.0.0.0 return as [prefix::], [::] - drop)
+#               default behavior.
+#   "process" - 0.0.0.0 translate to [::]. [::] return "as-is"
+#   "discard" - discard this address
+
+[dns64.my-example-zone]             # Example additional zone where we will bypass ipv4 and ipv6 responses back without any modifications.
+domains = [                         # (mandatory) Domain filter for the zone.
+    "example.com",                  # domain itself and all subdomains any level
+    "com.tr"
+]
+return-public-ipv4 = true           # (optional) add ipv4 response back. false if ommited
+return-public-ipv6 = true           # (optional) add ipv6 response back. false if ommited
+
+[dns64.ygg-zone]                    # Zone example with .ygg domains
+domains = [".ygg"]                  # (mandatory) Domain filter for the zone.
+forwarder = "[308:84:68:55::]:53"   # (optional) custom forwarder to alfis dns servers with .ygg zone
+# This is internal yggdrasil zone. In this case we will get AAAA responses with yggdrasil addreses "200::/7". We don't need to change anything. Just return it back.
+
+[dns64.empty-zone]                  # This example will have NXDOMAIN response for the whole filtered domains because we have nor white ipv4, ipv6 responses nor nat64.
+domains = ["empty"]                 # (mandatory) This example filter will cover .empty zone with all subdomains
+return-public-ipv4 = false          # (optional) do not add public ipv4 adderss to the response
+return-public-ipv6 = false          # (optional) do not add ipv6 response back. false if ommited
+# No "prefix" added.
+
+
+[dns64.default-zone]                # default zone example could have any name
+domains = ["."]                     # (mandatory) Domain filter. All the remaining domains that is not covered by other zones falls to this default zone
+return-public-ipv4 = false          # (optional) do not add public ipv4 adderss to the response
+prefix: "301:363a:9499:c858::"      # (optional) add nat64 prefix to the response. Config value prefilled with the same as nat64 zone. But could be different for other zones.
+# If zone has no "prefix" we won't add nat64 prefix to the response.
+```

@@ -1,0 +1,147 @@
+{
+  # Your private key. DO NOT share this with anyone!
+  PrivateKey: 414fdc7f88f1c19bed8d37ca0bd2b2007747532cd994325283162e54df46462d96fe6cecf87aae765e079e61048c19ae07cb7944acbfe770181012072bda77b8
+
+  # List of outbound peer connection strings (e.g. tls://a.b.c.d:e or
+  # socks://a.b.c.d:e/f.g.h.i:j). Connection strings can contain options,
+  # see https://yggdrasil-network.github.io/configurationref.html#peers.
+  # Yggdrasil has no concept of bootstrap nodes - all network traffic
+  # will transit peer connections. Therefore make sure to only peer with
+  # nearby nodes that have good connectivity and low latency. Avoid adding
+  # peers to this list from distant countries as this will worsen your
+  # node's connectivity and performance considerably.
+  Peers: []
+
+  # List of connection strings for outbound peer connections in URI format,
+  # arranged by source interface, e.g. { "eth0": [ "tls://a.b.c.d:e" ] }.
+  # You should only use this option if your machine is multi-homed and you
+  # want to establish outbound peer connections on different interfaces.
+  # Otherwise you should use "Peers".
+  InterfacePeers: {}
+
+  # Listen addresses for incoming connections. You will need to add
+  # listeners in order to accept incoming peerings from non-local nodes.
+  # This is not required if you wish to establish outbound peerings only.
+  # Multicast peer discovery will work regardless of any listeners set
+  # here. Each listener should be specified in URI format as above, e.g.
+  # tls://0.0.0.0:0 or tls://[::]:0 to listen on all interfaces.
+  Listen: []
+
+  # Listen address for admin connections. Default is to listen for local
+  # connections either on TCP/9001 or a UNIX socket depending on your
+  # platform. Use this value for yggdrasilctl -endpoint=X. To disable
+  # the admin socket, use the value "none" instead.
+  AdminListen: none
+
+  # Configuration for which interfaces multicast peer discovery should be
+  # enabled on. Regex is a regular expression which is matched against an
+  # interface name, and interfaces use the first configuration that they
+  # match against. Beacon controls whether or not your node advertises its
+  # presence to others, whereas Listen controls whether or not your node
+  # listens out for and tries to connect to other advertising nodes. See
+  # https://yggdrasil-network.github.io/configurationref.html#multicastinterfaces
+  # for more supported options.
+  MulticastInterfaces: [
+    {
+      Regex: en.*
+      Beacon: true
+      Listen: true
+      Password: ""
+    }
+    {
+      Regex: bridge.*
+      Beacon: true
+      Listen: true
+      Password: ""
+    }
+    {
+      Regex: awdl0
+      Beacon: false
+      Listen: false
+      Password: ""
+    }
+  ]
+
+  # List of peer public keys to allow incoming peering connections
+  # from. If left empty/undefined then all connections will be allowed
+  # by default. This does not affect outgoing peerings, nor does it
+  # affect link-local peers discovered via multicast.
+  # WARNING: THIS IS NOT A FIREWALL and DOES NOT limit who can reach
+  # open ports or services running on your machine!
+  AllowedPublicKeys: []
+
+  # Local network interface name for TUN adapter, or "auto" to select
+  # an interface automatically, or "none" to run without TUN.
+  IfName: none
+
+  # Maximum Transmission Unit (MTU) size for your local TUN interface.
+  # Default is the largest supported size for your platform. The lowest
+  # possible value is 1280.
+  IfMTU: 65535
+
+  # By default, nodeinfo contains some defaults including the platform,
+  # architecture and Yggdrasil version. These can help when surveying
+  # the network and diagnosing network routing problems. Enabling
+  # nodeinfo privacy prevents this, so that only items specified in
+  # "NodeInfo" are sent back if specified.
+  NodeInfoPrivacy: false
+
+  # Optional nodeinfo. This must be a { "key": "value", ... } map
+  # or set as null. This is entirely optional but, if set, is visible
+  # to the whole network on request.
+  NodeInfo: {}
+
+  # Shared allowed source filter for both NAT64 and DNS64 services.
+  # CIDR notation or individual IPv6 addresses.
+  AllowedSources: ["200::/7"]
+
+  # Enable NAT64 service. If false, the NAT64 service will not be started.
+  Nat64Enable: true
+
+  # NAT64 prefix to use for synthesising IPv6 addresses from IPv4 addresses.
+  # Pre-generated from the private key. Must be a /96 prefix.
+  Nat64Pool: "300:d203:2626:f0a::/96"
+
+  # Idle timeout in seconds before a UDP NAT64 session is expired.
+  Nat64UdpTimeout: 30
+
+
+  # Enable DNS64 service. If false, the DNS64 service will not be started.
+  Dns64Enable: true
+
+  # Listen address for DNS64 service. Must be a valid IPv6 address and port.
+  # Pre-generated from the private key.
+  Dns64Listen: "[200:d203:2626:f0a:a313:43f0:c33d:f6e7]:53"
+  
+  Dns64Default: "8.8.8.8:53"
+  Dns64CacheExpiration: 300
+  Dns64CachePurge: 600
+
+  # Dns64InvalidAddress: "ignore" | "process" | "discard"
+  # What to do with an "0.0.0.0" and [::] addresses
+  #   "ignore"  - treated like a regular address (i.e. 0.0.0.0 return as [prefix::], [::] - drop)
+  #               default behavior.
+  #   "process" - 0.0.0.0 translate to [::]. [::] return "as-is"
+  #   "discard" - discard this address
+  Dns64InvalidAddress: "ignore"
+
+  Dns64Zones: [
+    # Default zone: synthesise AAAA records from A records using the NAT64 prefix.
+    {
+      domains: ["."]
+      return-public-ipv4: false
+      prefix: "300:d203:2626:f0a::"
+    }
+    # Example: Yggdrasil-native .ygg zone — forward to Alfis DNS, pass through 200::/7 responses.
+    # {
+    #   domains: [".ygg"]
+    #   forwarder: "[308:84:68:55::]:53"
+    # }
+    # Example: Pass-through zone — return real IPv4 and IPv6 records unchanged.
+    # {
+    #   domains: ["example.com", "com.tr"]
+    #   return-public-ipv4: true
+    #   return-public-ipv6: true
+    # }
+  ]
+}

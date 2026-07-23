@@ -1,0 +1,38 @@
+[Unit]
+Description=ydn64 — TUN-less Yggdrasil node with NAT64 and DNS64
+Documentation=https://github.com/yggdrasil-network/ydn64
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ydn64 -useconffile /etc/ydn64/ydn64.toml -logto syslog
+Restart=on-failure
+RestartSec=5s
+
+# Run as a dedicated user with no special privileges.
+# Create with: useradd --system --no-create-home --shell /sbin/nologin ydn64
+User=ydn64
+Group=ydn64
+
+# Keep the config directory readable.
+ReadOnlyPaths=/etc/ydn64
+
+# Security hardening.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

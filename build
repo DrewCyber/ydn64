@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+PKG="github.com/yggdrasil-network/ydn64/cmd/ydn64"
+VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "unknown")
+LDFLAGS="-X main.buildVersion=${VERSION}"
+
+echo "Building ydn64 ${VERSION}..."
+go build -ldflags "${LDFLAGS}" -o ydn64 "${PKG}"
+echo "Done: $(pwd)/ydn64"
