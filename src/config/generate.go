@@ -126,7 +126,8 @@ func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string) string {
 
 	sb.WriteString("  # Shared allowed source filter for both NAT64 and DNS64 services.\n")
 	sb.WriteString("  # CIDR notation or individual IPv6 addresses.\n")
-	sb.WriteString("  AllowedSources: [\"200::/7\"]\n\n")
+	sb.WriteString("  # AllowedSources: [\"200::/7\"]\n")
+	sb.WriteString("  AllowedSources: [\"200:aaaa:bbbb:cccc:dddd:eeee:ffff:1234/128\"]\n\n")
 
 	sb.WriteString("  # Enable NAT64 service. If false, the NAT64 service will not be started.\n")
 	sb.WriteString("  Nat64Enable: true\n\n")
