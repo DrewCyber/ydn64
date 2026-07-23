@@ -98,14 +98,14 @@ func Load(path string) (*ygconfig.NodeConfig, *AppConfig, error) {
 	if err := hjson.Unmarshal(data, appCfg); err != nil {
 		return nil, nil, fmt.Errorf("parsing ydn64 section of %q: %w", path, err)
 	}
-	if err := appCfg.validate(); err != nil {
+	if err := appCfg.Validate(); err != nil {
 		return nil, nil, fmt.Errorf("invalid config %q: %w", path, err)
 	}
 
 	return ygCfg, appCfg, nil
 }
 
-func (c *AppConfig) validate() error {
+func (c *AppConfig) Validate() error {
 	for _, src := range c.AllowedSources {
 		if _, _, err := net.ParseCIDR(src); err != nil {
 			if net.ParseIP(src) == nil {

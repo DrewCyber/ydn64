@@ -104,7 +104,25 @@ src/nat64/              NAT64 service: packet.go, service.go, tcp.go, udp.go, ic
 src/dns64/              DNS64 service: server.go, proxy.go, cache.go, zones.go
 context/                design notes — see caveat below
 tmp/                    git-ignored scratch space for local test runs
+Dockerfile              production multi-arch image (not test/Containerfile.ydn64, which is test-harness-only)
+docker-entrypoint.sh    generates ydn64.conf on first run if $YDN64_CONFIG is missing
+.github/workflows/      docker-publish.yml: builds + pushes ghcr.io images on vX.Y.Z tags
 ```
+
+### Container env var overrides
+
+`cmd/ydn64/main.go` applies `YDN64_PEERS` / `YDN64_ALLOWED_SOURCES`
+environment variables as overrides on top of the loaded config file,
+immediately after `config.Load(...)` and before the Yggdrasil core is
+constructed (Peers must be set before `core.New`; AllowedSources is
+re-validated via the now-exported `AppConfig.Validate()`). This exists
+specifically for the Docker image (see [docker-entrypoint.sh](docker-entrypoint.sh)
+and README's "Running with Docker" section) so a container can boot from a
+freshly-`-genconf`'d file without baking peers/allowed-sources into the image
+or requiring users to hand-edit a mounted config. Values are comma/whitespace
+separated (`splitEnvList` in main.go). If you add more overridable fields,
+follow the same pattern rather than shelling out to sed against the mounted
+HJSON file.
 
 ### `context/` caveat
 

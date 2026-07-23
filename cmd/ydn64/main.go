@@ -8,7 +8,9 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strings"
 	"syscall"
+	"unicode"
 
 	"github.com/gologme/log"
 	gsyslog "github.com/hashicorp/go-syslog"
@@ -28,6 +30,22 @@ type node struct {
 	core      *core.Core
 	multicast *multicast.Multicast
 	admin     *admin.AdminSocket
+}
+
+// splitEnvList splits a comma and/or whitespace separated environment
+// variable value (e.g. "tls://a:1, tls://b:2") into a trimmed, non-empty
+// slice of entries.
+func splitEnvList(v string) []string {
+	fields := strings.FieldsFunc(v, func(r rune) bool {
+		return r == ',' || unicode.IsSpace(r)
+	})
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 func setLogLevel(loglevel string, logger *log.Logger) {
@@ -109,6 +127,23 @@ func main() {
 	// Force TUN-less mode and disable admin socket.
 	ygCfg.AdminListen = "none"
 	ygCfg.IfName = "none"
+
+	// ── Environment variable overrides (container-friendly) ──────────────────
+	// Lets a Docker/Podman container built from a single generated config
+	// (identity, Nat64Pool, Dns64Listen, ...) still be pointed at real peers
+	// and locked down to the operator's own Yggdrasil address without baking
+	// either into the image or hand-editing the mounted config file.
+	if peers := os.Getenv("YDN64_PEERS"); peers != "" {
+		ygCfg.Peers = splitEnvList(peers)
+		logger.Infof("YDN64_PEERS override: %d peer(s)", len(ygCfg.Peers))
+	}
+	if allowed := os.Getenv("YDN64_ALLOWED_SOURCES"); allowed != "" {
+		appCfg.AllowedSources = splitEnvList(allowed)
+		if err := appCfg.Validate(); err != nil {
+			logger.Fatalf("YDN64_ALLOWED_SOURCES override invalid: %v", err)
+		}
+		logger.Infof("YDN64_ALLOWED_SOURCES override: %d entr(y/ies)", len(appCfg.AllowedSources))
+	}
 
 	// ── Start yggdrasil core ─────────────────────────────────────────────────
 

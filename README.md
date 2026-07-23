@@ -39,6 +39,36 @@ practice you only need to edit two fields before running:
 
 Everything else is configured with secure, working defaults out of the box.
 
+## Running with Docker
+
+Multi-arch (`linux/amd64`, `linux/arm64`) images are published to
+`ghcr.io/drewcyber/ydn64` on every version tag (`vX.Y.Z`), plus a rolling
+`latest` tag. See [.github/workflows/docker-publish.yml](.github/workflows/docker-publish.yml).
+
+The image's entrypoint ([docker-entrypoint.sh](docker-entrypoint.sh)) will
+generate a fresh config with `ydn64 -genconf` on first run if none exists at
+`$YDN64_CONFIG` (default `/data/ydn64.conf`). **Mount `/data` as a volume** so
+the generated `PrivateKey` (and the `Nat64Pool`/`Dns64Listen` addresses
+derived from it) stay stable across container restarts — without it, every
+restart gets a brand new Yggdrasil identity.
+
+The two fields you normally must set — `Peers` and `AllowedSources` — can be
+supplied as environment variables instead of editing the mounted config file,
+as a comma and/or whitespace separated list. `ydn64` applies them as
+overrides on top of the loaded config at startup:
+
+```sh
+docker run -d \
+  --name ydn64 \
+  -v ydn64-data:/data \
+  -e YDN64_PEERS="tls://a.b.c.d:e, tls://f.g.h.i:j" \
+  -e YDN64_ALLOWED_SOURCES="200::/7" \
+  --cap-add=NET_RAW \
+  ghcr.io/drewcyber/ydn64:latest
+```
+
+`--cap-add=NET_RAW` is optional but recommended — see below.
+
 ## ICMP NAT64 and `CAP_NET_RAW`
 
 NAT64's ICMP Echo translation opens a raw ICMPv4 socket
