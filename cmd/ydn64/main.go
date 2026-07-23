@@ -16,10 +16,10 @@ import (
 	"github.com/yggdrasil-network/yggdrasil-go/src/core"
 	"github.com/yggdrasil-network/yggdrasil-go/src/multicast"
 
-	"github.com/yggdrasil-network/ydn64/src/config"
-	"github.com/yggdrasil-network/ydn64/src/dns64"
-	"github.com/yggdrasil-network/ydn64/src/nat64"
-	"github.com/yggdrasil-network/ydn64/src/netstack"
+	"github.com/DrewCyber/ydn64/src/config"
+	"github.com/DrewCyber/ydn64/src/dns64"
+	"github.com/DrewCyber/ydn64/src/nat64"
+	"github.com/DrewCyber/ydn64/src/netstack"
 )
 
 var buildVersion = "dev"

@@ -1,6 +1,6 @@
 [Unit]
 Description=ydn64 — TUN-less Yggdrasil node with NAT64 and DNS64
-Documentation=https://github.com/yggdrasil-network/ydn64
+Documentation=https://github.com/DrewCyber/ydn64
 After=network-online.target
 Wants=network-online.target
 
@@ -17,6 +17,13 @@ Group=ydn64
 
 # Keep the config directory readable.
 ReadOnlyPaths=/etc/ydn64
+
+# Grant CAP_NET_RAW for NAT64 ICMP Echo translation (raw ICMPv4 socket).
+# Without this, ICMP NAT64 is silently disabled (TCP/UDP NAT64 and DNS64 are
+# unaffected — they run entirely inside the userspace netstack, no special
+# capability needed).
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
 
 # Security hardening.
 NoNewPrivileges=yes

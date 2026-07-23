@@ -14,8 +14,8 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 
-	"github.com/yggdrasil-network/ydn64/src/config"
-	"github.com/yggdrasil-network/ydn64/src/netstack"
+	"github.com/DrewCyber/ydn64/src/config"
+	"github.com/DrewCyber/ydn64/src/netstack"
 )
 
 // Service is the embedded DNS64 server.

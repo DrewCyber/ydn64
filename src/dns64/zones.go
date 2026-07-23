@@ -5,7 +5,7 @@ import (
 	"net"
 	"strings"
 
-	"github.com/yggdrasil-network/ydn64/src/config"
+	"github.com/DrewCyber/ydn64/src/config"
 )
 
 // InvalidAddress controls how unspecified addresses (0.0.0.0 / ::) are handled.

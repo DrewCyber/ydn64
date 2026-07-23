@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-PKG="github.com/yggdrasil-network/ydn64/cmd/ydn64"
+PKG="github.com/DrewCyber/ydn64/cmd/ydn64"
 VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "unknown")
 LDFLAGS="-X main.buildVersion=${VERSION}"
 

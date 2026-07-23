@@ -12,8 +12,8 @@ import (
 	"golang.org/x/net/icmp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 
-	"github.com/yggdrasil-network/ydn64/src/config"
-	"github.com/yggdrasil-network/ydn64/src/netstack"
+	"github.com/DrewCyber/ydn64/src/config"
+	"github.com/DrewCyber/ydn64/src/netstack"
 )
 
 // Service implements TUN-less NAT64: it intercepts IPv6 packets addressed to

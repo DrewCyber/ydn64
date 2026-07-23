@@ -118,7 +118,7 @@ tmp/                    git-ignored scratch space for local test runs
 
 ## Conventions
 
-- Go module: `github.com/yggdrasil-network/ydn64`, Go 1.25.5.
+- Go module: `github.com/DrewCyber/ydn64`, Go 1.25.5.
 - Config format is **HJSON** (`github.com/hjson/hjson-go/v4`), not JSON/TOML/YAML — comments in config files are load-bearing documentation, preserve them when regenerating templates.
 - Config keys use `PascalCase` (matching upstream Yggdrasil's own config style), not `snake_case` or `camelCase`.
 - Logging via `github.com/gologme/log`, levels: error/warn/info/debug/trace, set with `-loglevel`.
