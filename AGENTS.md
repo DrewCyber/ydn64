@@ -54,11 +54,12 @@ artifacts to the system temp dir or the repo root**.
 ## Configuration — single merged file
 
 As of the current design, **`-genconf` prints a single merged HJSON config
-to stdout** (see [context/ydn64.conf.example](context/ydn64.conf.example) for
-the annotated reference) — it does not write any file itself; redirect
-stdout (e.g. `> ydn64.conf`) to save it, matching upstream yggdrasil-go's own
-`-genconf` behavior. There is no separate `yggdrasil.conf` / `ydn64.toml`
-split — that was an earlier iteration and has been merged.
+to stdout** (see the inline comments in
+[src/config/generate.go](src/config/generate.go), or the "Configuration"
+section of [README.md](README.md)) — it does not write any file itself;
+redirect stdout (e.g. `> ydn64.conf`) to save it, matching upstream
+yggdrasil-go's own `-genconf` behavior. There is no separate `yggdrasil.conf`
+/ `ydn64.toml` split — that was an earlier iteration and has been merged.
 
 The single file is decoded **twice** from the same bytes in
 [src/config/config.go](src/config/config.go):
@@ -90,8 +91,8 @@ When changing the config schema:
 - Update the generated template in
   [src/config/generate.go](src/config/generate.go) so `-genconf` output stays
   in sync.
-- Update [context/ydn64.conf.example](context/ydn64.conf.example) (the
-  human-facing annotated reference).
+- Update the "Configuration" section of [README.md](README.md) if the change
+  affects what users need to edit by hand.
 
 ## Repo layout
 
@@ -107,9 +108,12 @@ tmp/                    git-ignored scratch space for local test runs
 
 ### `context/` caveat
 
-- [context/general-idea.txt](context/general-idea.txt) — original design brief, still broadly accurate for intent/motivation.
-- [context/old/improvement.txt](context/old/improvement.txt) — **stale**: an early DNS64/NAT64 design note using a sectioned TOML (`[nat64]`/`[dns64]`/`[dns64.<zone>]`) layout with `snake_case` keys. The actual config is a single flat HJSON file with `PascalCase` keys and a `Dns64Zones` array (see [context/ydn64.conf.example](context/ydn64.conf.example)). Useful for the *behavioral* intent (NXDOMAIN fallback, zone matching rules) but don't follow its config syntax.
-- [context/ydn64.conf.example](context/ydn64.conf.example) — the current, authoritative annotated config reference; keep it in sync with `config.go`/`generate.go`.
+- [context/improvement.txt](context/improvement.txt) — **stale**: an early DNS64/NAT64 design note using a sectioned TOML (`[nat64]`/`[dns64]`/`[dns64.<zone>]`) layout with `snake_case` keys. The actual config is a single flat HJSON file with `PascalCase` keys and a `Dns64Zones` array (see [src/config/generate.go](src/config/generate.go) or [README.md](README.md)). Useful for the *behavioral* intent (NXDOMAIN fallback, zone matching rules) but don't follow its config syntax.
+- This is currently the only file under `context/` — earlier drafts of this
+  doc referenced `context/general-idea.txt` and `context/ydn64.conf.example`,
+  but those have since been removed from the repo; the authoritative config
+  reference now lives in `src/config/generate.go`'s inline comments and
+  README.md's "Configuration" section.
 
 
 ## Conventions
