@@ -17,10 +17,10 @@ import (
 // Service implements TUN-less NAT64: it intercepts IPv6 packets addressed to
 // the pool6::/96 subnet and proxies them to real IPv4 destinations.
 //
-//   TCP — handled via gVisor's tcp.NewForwarder (promiscuous mode is enabled
-//          on the gVisor stack so it accepts pool6::IPv4 destinations).
-//   UDP — intercepted at NIC level before gVisor, replies are raw IPv6 packets
-//          written directly to ipv6rwc.
+//	TCP — handled via gVisor's tcp.NewForwarder (promiscuous mode is enabled
+//	       on the gVisor stack so it accepts pool6::IPv4 destinations).
+//	UDP — intercepted at NIC level before gVisor, replies are raw IPv6 packets
+//	       written directly to ipv6rwc.
 type Service struct {
 	pool6Net    *net.IPNet
 	allowedNets []*net.IPNet
@@ -69,9 +69,9 @@ func (s *Service) isAllowed(ip net.IP) bool {
 }
 
 // Start activates the NAT64 service:
-//   1. Installs a gVisor TCP forwarder (handles pool6 TCP SYNs).
-//   2. Registers the UDP packet interceptor on the NIC read path.
-//   3. Starts the UDP session idle-cleanup goroutine.
+//  1. Installs a gVisor TCP forwarder (handles pool6 TCP SYNs).
+//  2. Registers the UDP packet interceptor on the NIC read path.
+//  3. Starts the UDP session idle-cleanup goroutine.
 func (s *Service) Start(ctx context.Context, logger *log.Logger) {
 	// ── TCP: gVisor tcp.NewForwarder ─────────────────────────────────────────
 	tcpFwd := tcp.NewForwarder(s.ns.Stack(), 0, 65535, func(req *tcp.ForwarderRequest) {

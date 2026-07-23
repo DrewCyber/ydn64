@@ -8,10 +8,10 @@ import (
 // dnsCache is a simple TTL cache for DNS answers.
 // Keys are DNS question names (FQDN strings), values are []dns.RR slices.
 type dnsCache struct {
-	mu              sync.RWMutex
-	items           map[string]cacheItem
-	defaultExp      time.Duration
-	purgeInterval   time.Duration
+	mu            sync.RWMutex
+	items         map[string]cacheItem
+	defaultExp    time.Duration
+	purgeInterval time.Duration
 }
 
 type cacheItem struct {

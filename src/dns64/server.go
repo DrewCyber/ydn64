@@ -55,10 +55,10 @@ func NewService(cfg config.DNS64Config, allowedSources []string, ns *netstack.Yg
 	}
 
 	return &Service{
-		proxy:      p,
-		listenAddr: cfg.Listen,
+		proxy:       p,
+		listenAddr:  cfg.Listen,
 		allowedNets: allowed,
-		ns:         ns,
+		ns:          ns,
 	}, nil
 }
 
@@ -149,8 +149,10 @@ func (s *Service) serveUDP(conn *gonet.UDPConn, logger *log.Logger) {
 			srcIP = udpAddr.IP
 		}
 		if srcIP == nil || !s.isAllowed(srcIP) {
+			logger.Debugf("DNS64: denied query from %s (not in AllowedSources)", addr)
 			continue
 		}
+		logger.Debugf("DNS64: query from %s (%d bytes)", addr, n)
 
 		pkt := make([]byte, n)
 		copy(pkt, buf[:n])

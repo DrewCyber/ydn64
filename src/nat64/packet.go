@@ -5,19 +5,19 @@ import "encoding/binary"
 // buildIPv6UDPPacket constructs a raw IPv6 + UDP packet ready to be injected
 // into the Yggdrasil network via YggdrasilNetstack.WritePacket.
 //
-//   srcIP, dstIP  — 16-byte IPv6 addresses
-//   srcPort       — source UDP port (network byte order semantics handled here)
-//   dstPort       — destination UDP port
-//   payload       — UDP payload
+//	srcIP, dstIP  — 16-byte IPv6 addresses
+//	srcPort       — source UDP port (network byte order semantics handled here)
+//	dstPort       — destination UDP port
+//	payload       — UDP payload
 func buildIPv6UDPPacket(srcIP, dstIP []byte, srcPort, dstPort uint16, payload []byte) []byte {
 	udpLen := 8 + len(payload)
 	pkt := make([]byte, 40+udpLen)
 
 	// ── IPv6 fixed header (40 bytes) ─────────────────────────────────────────
-	pkt[0] = 0x60 // Version=6, Traffic Class=0, Flow Label=0 (bytes 1-3 already 0)
+	pkt[0] = 0x60                                        // Version=6, Traffic Class=0, Flow Label=0 (bytes 1-3 already 0)
 	binary.BigEndian.PutUint16(pkt[4:6], uint16(udpLen)) // Payload length
-	pkt[6] = 17                                           // Next header = UDP
-	pkt[7] = 64                                           // Hop limit
+	pkt[6] = 17                                          // Next header = UDP
+	pkt[7] = 64                                          // Hop limit
 	copy(pkt[8:24], srcIP)
 	copy(pkt[24:40], dstIP)
 

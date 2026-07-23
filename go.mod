@@ -3,7 +3,6 @@ module github.com/yggdrasil-network/ydn64
 go 1.25.5
 
 require (
-	github.com/BurntSushi/toml v1.4.1-0.20240526193622-a339e1f7089c
 	github.com/gologme/log v1.3.0
 	github.com/hashicorp/go-syslog v1.0.0
 	github.com/hjson/hjson-go/v4 v4.6.0

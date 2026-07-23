@@ -36,7 +36,6 @@ func parseIA(s string) (InvalidAddress, error) {
 
 // zone is the resolved, ready-to-use form of config.ZoneConfig.
 type zone struct {
-	name             string
 	domains          []string // already lower-cased
 	forwarder        string   // empty → use default
 	prefix           net.IP   // nil → no NAT64 synthesis
@@ -52,21 +51,20 @@ func init() {
 	_, yggNet, _ = net.ParseCIDR("200::/7")
 }
 
-// buildZones converts the config zone map into a slice of resolved zone
+// buildZones converts the config zone slice into a slice of resolved zone
 // structs.  Validation has already been done in config.validate().
-func buildZones(cfgZones map[string]config.ZoneConfig) []zone {
+func buildZones(cfgZones []config.ZoneConfig) []zone {
 	out := make([]zone, 0, len(cfgZones))
-	for name, z := range cfgZones {
+	for _, z := range cfgZones {
 		var prefix net.IP
 		if z.Prefix != "" {
 			prefix = net.ParseIP(z.Prefix)
 		}
 		domains := make([]string, len(z.Domains))
-		for i, d := range z.Domains {
-			domains[i] = strings.ToLower(d)
+		for j, d := range z.Domains {
+			domains[j] = strings.ToLower(d)
 		}
 		out = append(out, zone{
-			name:             name,
 			domains:          domains,
 			forwarder:        z.Forwarder,
 			prefix:           prefix,

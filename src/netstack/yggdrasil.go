@@ -23,7 +23,7 @@ type YggdrasilNIC struct {
 	dispatcher stack.NetworkDispatcher
 	readBuf    []byte
 	writeBuf   []byte
-	rstPackets chan *stack.PacketBuffer
+	ctrlPackets chan *stack.PacketBuffer
 }
 
 // NewYggdrasilNIC creates the Yggdrasil NIC, attaches it to the gVisor stack,
@@ -37,7 +37,7 @@ func (s *YggdrasilNetstack) NewYggdrasilNIC(ygg *core.Core) tcpip.Error {
 		ipv6rwc:    rwc,
 		readBuf:    make([]byte, mtu),
 		writeBuf:   make([]byte, mtu),
-		rstPackets: make(chan *stack.PacketBuffer, 100),
+		ctrlPackets: make(chan *stack.PacketBuffer, 100),
 	}
 
 	if err := s.stack.CreateNIC(1, nic); err != nil {
@@ -67,9 +67,11 @@ func (s *YggdrasilNetstack) NewYggdrasilNIC(ygg *core.Core) tcpip.Error {
 		}
 	}()
 
-	// RST packet flush loop: required for zero-payload TCP RST frames.
+	// Control packet flush loop: zero-payload TCP frames (SYN, SYN-ACK, ACK,
+	// FIN, RST) are queued here from WritePackets and written out
+	// asynchronously — see the comment in WritePackets for why.
 	go func() {
-		for pkt := range nic.rstPackets {
+		for pkt := range nic.ctrlPackets {
 			if pkt == nil {
 				continue
 			}
@@ -92,19 +94,17 @@ func (s *YggdrasilNetstack) NewYggdrasilNIC(ygg *core.Core) tcpip.Error {
 	}
 	s.stack.AddRoute(tcpip.Route{Destination: yggSubnet, NIC: 1})
 
-	// Register the node's own address as local (needed for HandleLocal mode).
-	if s.stack.HandleLocal() {
-		ip := ygg.Address()
-		if addErr := s.stack.AddProtocolAddress(
-			1,
-			tcpip.ProtocolAddress{
-				Protocol:          ipv6.ProtocolNumber,
-				AddressWithPrefix: tcpip.AddrFromSlice(ip.To16()).WithPrefix(),
-			},
-			stack.AddressProperties{},
-		); addErr != nil {
-			return addErr
-		}
+	// Register the node's own address so gVisor delivers packets addressed to it.
+	ip := ygg.Address()
+	if addErr := s.stack.AddProtocolAddress(
+		1,
+		tcpip.ProtocolAddress{
+			Protocol:          ipv6.ProtocolNumber,
+			AddressWithPrefix: tcpip.AddrFromSlice(ip.To16()).WithPrefix(),
+		},
+		stack.AddressProperties{},
+	); addErr != nil {
+		return addErr
 	}
 
 	return nil
@@ -148,17 +148,20 @@ func (e *YggdrasilNIC) WritePackets(list stack.PacketBufferList) (int, tcpip.Err
 	var i int
 	var tcpErr tcpip.Error
 	for i, pkt := range list.AsSlice() {
-		if pkt.Data().Size() == 0 {
-			if pkt.Network().TransportProtocol() == tcp.ProtocolNumber {
-				tcpHdr := header.TCP(pkt.TransportHeader().Slice())
-				if tcpHdr.Flags()&header.TCPFlagRst == header.TCPFlagRst {
-					pkt.IncRef()
-					select {
-					case e.rstPackets <- pkt:
-					default:
-						pkt.DecRef()
-					}
-				}
+		if pkt.Data().Size() == 0 && pkt.Network().TransportProtocol() == tcp.ProtocolNumber {
+			// Zero-payload TCP control packets (SYN, SYN-ACK, pure ACK, FIN,
+			// RST) are queued to a background writer instead of being written
+			// synchronously here, since WritePackets can be invoked from deep
+			// inside gVisor's packet-dispatch call path (e.g. when the TCP
+			// forwarder issues an RST while handling an inbound segment).
+			// Previously only RST frames were queued this way; every other
+			// zero-payload control packet (crucially, SYN-ACK) was silently
+			// dropped here, which broke the TCP handshake for NAT64.
+			pkt.IncRef()
+			select {
+			case e.ctrlPackets <- pkt:
+			default:
+				pkt.DecRef()
 			}
 			continue
 		}

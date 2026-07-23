@@ -6,7 +6,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/ydn64 -useconffile /etc/ydn64/ydn64.toml -logto syslog
+ExecStart=/usr/bin/ydn64 -useconffile /etc/ydn64/ydn64.conf -logto syslog
 Restart=on-failure
 RestartSec=5s
 

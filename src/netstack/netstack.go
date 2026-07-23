@@ -51,20 +51,20 @@ func (s *YggdrasilNetstack) SetPacketInterceptor(fn func([]byte) bool) {
 // enables promiscuous mode so gVisor's TCP forwarder can accept packets
 // destined to any address in the pool6 range.
 func CreateYdn64Netstack(ygg *core.Core, pool6CIDR string) (*YggdrasilNetstack, error) {
+	// NOTE: HandleLocal is intentionally left false (the default). gVisor's
+	// HandleLocal mode is meant for same-stack loopback shortcutting, which
+	// ydn64 never needs (it only ever talks to remote Yggdrasil peers). When
+	// HandleLocal is true AND promiscuous mode is enabled on the NIC (as NAT64
+	// does below for pool6 destinations), gVisor's IPv6 HandlePacket() treats
+	// every remote sender's address as "one of our own" (since promiscuous
+	// mode makes AcquireAssignedAddress auto-provision a temporary address for
+	// any address queried) and drops ALL inbound traffic as a martian/local
+	// source. Keeping HandleLocal false avoids that gVisor foot-gun entirely.
 	s := &YggdrasilNetstack{
 		stack: stack.New(stack.Options{
 			NetworkProtocols:   []stack.NetworkProtocolFactory{ipv6.NewProtocol},
 			TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol6},
-			HandleLocal:        true,
 		}),
-	}
-
-	if s.stack.HandleLocal() {
-		s.stack.AllowICMPMessage()
-	} else {
-		if err := s.stack.SetForwardingDefaultAndAllNICs(ipv6.ProtocolNumber, true); err != nil {
-			return nil, fmt.Errorf("enabling IPv6 forwarding: %s", err)
-		}
 	}
 
 	if tcpErr := s.NewYggdrasilNIC(ygg); tcpErr != nil {
@@ -81,6 +81,15 @@ func CreateYdn64Netstack(ygg *core.Core, pool6CIDR string) (*YggdrasilNetstack, 
 		// is pool6::IPv4 (an address range, not a single registered address).
 		if tcpErr := s.stack.SetPromiscuousMode(1, true); tcpErr != nil {
 			return nil, fmt.Errorf("enabling promiscuous mode for NAT64: %s", tcpErr.String())
+		}
+		// Enable spoofing so gVisor allows *outgoing* packets (e.g. TCP SYN-ACK
+		// replies) to use a pool6::IPv4 source address, since that address is
+		// never actually registered on the NIC (only matched via promiscuous
+		// mode on receive). Without this, FindRoute's source-address lookup
+		// (nic.findEndpoint, gated on Spoofing — a separate flag from
+		// Promiscuous) fails and NAT64 TCP replies are silently dropped.
+		if tcpErr := s.stack.SetSpoofing(1, true); tcpErr != nil {
+			return nil, fmt.Errorf("enabling spoofing for NAT64: %s", tcpErr.String())
 		}
 	}
 

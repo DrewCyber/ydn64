@@ -1,0 +1,15 @@
+# A full, unmodified, latest upstream yggdrasil-go node — used as the
+# "reference client" peer in the black-box test harness so we're validating
+# real interop, not just two ydn64 instances talking to themselves.
+#
+# This node needs a real TUN device (CAP_NET_ADMIN + /dev/net/tun) since,
+# unlike ydn64, it has no userspace netstack fallback.
+FROM golang:1.25-alpine AS build
+RUN apk add --no-cache git
+RUN go install github.com/yggdrasil-network/yggdrasil-go/cmd/yggdrasil@latest && \
+    go install github.com/yggdrasil-network/yggdrasil-go/cmd/yggdrasilctl@latest
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates bind-tools curl iproute2 tcpdump
+COPY --from=build /go/bin/yggdrasil /go/bin/yggdrasilctl /usr/local/bin/
+ENTRYPOINT ["yggdrasil"]
