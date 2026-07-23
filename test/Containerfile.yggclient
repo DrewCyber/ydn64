@@ -10,6 +10,6 @@ RUN go install github.com/yggdrasil-network/yggdrasil-go/cmd/yggdrasil@latest &&
     go install github.com/yggdrasil-network/yggdrasil-go/cmd/yggdrasilctl@latest
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates bind-tools curl iproute2 tcpdump
+RUN apk add --no-cache ca-certificates bind-tools curl iproute2 tcpdump iputils
 COPY --from=build /go/bin/yggdrasil /go/bin/yggdrasilctl /usr/local/bin/
 ENTRYPOINT ["yggdrasil"]

@@ -115,6 +115,18 @@ func main() {
 		merged["Dns64CachePurge"] = 600
 		merged["Dns64InvalidAddress"] = *dns64Invalid
 		merged["Dns64Zones"] = []map[string]interface{}{
+			// Real-world escape hatch used only by
+			// test/cases/05_real_world_icmp.sh: dns.google is forwarded to
+			// Google's real public resolver instead of the hermetic fake
+			// target, so that case can validate NAT64/DNS64 against an
+			// actual internet host. Every other test queries only
+			// target.test, which still resolves entirely through the
+			// catch-all zone below via the offline fake target container.
+			{
+				"domains":   []string{"dns.google"},
+				"forwarder": "8.8.8.8:53",
+				"prefix":    pool6Prefix,
+			},
 			{
 				"domains":            []string{"."},
 				"return-public-ipv4": false,

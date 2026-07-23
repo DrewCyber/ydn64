@@ -74,7 +74,7 @@ genconfs() {
   log "generating B (yggdrasil-go client) config..."
   ( cd "$ROOT_DIR" && go run ./test/gen \
       -role=client \
-      -peers="tcp://${IP_A_YGG}:${YGG_PORT}" \
+      -peers="tcp://${IP_A_YGG}:${YGG_PORT}?maxbackoff=5s" \
       -out="$RUN_DIR/yggclient.conf" \
       -envout="$RUN_DIR/yggclient.env" )
 
@@ -103,6 +103,7 @@ cmd_up() {
   log "starting A (ydn64)..."
   $PODMAN run -d --name "$CT_A" \
     --network "${NET_YGG}:ip=${IP_A_YGG}" \
+    --cap-add=NET_RAW \
     -v "$RUN_DIR:/work:Z" \
     "$IMAGE_YDN64" -useconffile /work/ydn64.conf -logto /work/ydn64.log -loglevel debug >/dev/null
   $PODMAN network connect "$NET_TARGET" --ip "$IP_A_TARGET" "$CT_A"

@@ -9,7 +9,10 @@ Guidance for AI coding agents working in this repository.
 
 - **NAT64** (`src/nat64`) — stateful IPv6→IPv4 translation for allowed
   Yggdrasil peers, using a `Nat64Pool` prefix derived from the node's own
-  `300::/64` subnet.
+  `300::/64` subnet. Covers TCP (`tcp.go`), UDP (`udp.go`), and ICMP Echo
+  (`icmp.go` — translates ICMPv6 Echo Request/Reply to/from real ICMPv4 via a
+  raw socket, so `ping6` to a pool6 address works end-to-end against a real
+  IPv4 host).
 - **DNS64** (`src/dns64`) — a caching DNS64 resolver/proxy that synthesises
   AAAA records from A records (with per-zone forwarding/pass-through rules).
 
@@ -96,7 +99,7 @@ When changing the config schema:
 cmd/ydn64/main.go       CLI entry point, wiring: core → admin → multicast → netstack → nat64/dns64
 src/config/             config.go (load/validate), generate.go (-genconf template)
 src/netstack/           gVisor stack wrapper bound to Yggdrasil's ipv6rwc
-src/nat64/              NAT64 service: packet.go, service.go, tcp.go, udp.go
+src/nat64/              NAT64 service: packet.go, service.go, tcp.go, udp.go, icmp.go
 src/dns64/              DNS64 service: server.go, proxy.go, cache.go, zones.go
 context/                design notes — see caveat below
 tmp/                    git-ignored scratch space for local test runs
@@ -157,7 +160,39 @@ cd test
 - Peer re-establishment after a container restart is not instant — allow a
   generous timeout (`wait_for 30 ...` in `test/lib.sh`) rather than a tight
   one; yggdrasil-go's reconnect backoff timing is variable enough that a 15s
-  budget across two rapid restarts was observed to flake.
+  budget across two rapid restarts was observed to flake. B's peer URI in
+  `test/run.sh` sets `?maxbackoff=5s` (yggdrasil-go's hard minimum — bare
+  `maxbackoff=5` is invalid, it's parsed with `time.ParseDuration` and needs a
+  unit) so the reconnect backoff itself stays small; this makes most re-peers
+  land in ~1s instead of occasionally waiting much longer.
+- **Residual flake, not fixed by `maxbackoff`**: occasionally (~1-in-3
+  observed) `test/cases/04_allowed_sources_config_change.sh`'s second
+  `podman restart` of `A` is followed by B's yggdrasil logging repeated
+  `dial tcp 10.90.0.2:9993: i/o timeout` for 30+ seconds even though A is
+  confirmed up and listening in its own log, and `nc -zv` from B to A
+  succeeds again once the flake clears. This is a transient podman
+  bridge-networking hiccup on the macOS podman-machine VM (gvproxy/vfkit)
+  after a container restart recreates the veth — the TCP SYN itself is not
+  getting a response, so no amount of yggdrasil-level backoff tuning helps.
+  If this test starts flaking persistently, look at host/VM networking
+  convergence delay after `podman restart`, not at `src/` or the peering
+  config.
+- **Same flake can manifest as a hung `podman exec` itself**, not just a B→A
+  TCP dial timeout — observed once as a `podman exec ydn64-test-a ...`
+  command producing literally zero output (not even output from a plain
+  `date` run before it in the same loop) for far longer than expected,
+  immediately after reproducing the case 04 restart flake. Retrying the same
+  `podman exec` a bit later succeeded in under 200ms, confirming it was the
+  transient VM-networking hiccup clearing on its own, not a real hang in
+  ydn64 or a stuck shell. If a `podman exec` seems to hang with no output at
+  all, check `podman ps`/`podman machine` health and just wait/retry rather
+  than assuming ydn64 itself is stuck.
+- **`test/cases/05_real_world_icmp.sh`** (real-world DNS64+NAT64-ICMP check
+  against `dns.google`/8.8.8.8) runs immediately after case 04's restarts.
+  `wait_for` after case 04 only confirms B's yggnet peering is back, not that
+  A's targetnet egress path is fully settled — so case 05's initial `dig`
+  retries a few times (up to ~10s) before failing, rather than asserting on
+  the first attempt.
 
 ## gVisor netstack gotchas (`src/netstack/`)
 
@@ -199,3 +234,17 @@ Read this before touching `src/netstack/netstack.go` or
   guessing from symptoms — e.g. `transport/tcp/forwarder.go` and
   `transport/tcp/accept.go` (`performHandshake`) make the blocking/timeout
   behavior explicit.
+- `SetPacketInterceptor` on the netstack only supports **one** registered
+  callback. NAT64's UDP and ICMP paths share a single dispatcher
+  (`Service.interceptPacket` in `src/nat64/service.go`), which inspects the
+  IPv6 next-header byte (`pkt[6]`) and routes to `interceptUDPPacket` (17) or
+  `interceptICMPPacket` (58). Don't try to register a second interceptor —
+  extend the dispatcher instead.
+- **Raw ICMPv4 sockets need `CAP_NET_RAW`**, and it is **not** granted by
+  podman's default capability set — `icmp.ListenPacket("ip4:icmp", "0.0.0.0")`
+  fails with `operation not permitted` unless the container is started with
+  `--cap-add=NET_RAW` (see `test/run.sh`, container A). ICMP NAT64 opening
+  the raw socket is best-effort/non-fatal: if it fails, NAT64 logs a warning
+  (`NAT64 ICMP disabled ...`) and TCP/UDP continue working normally; check
+  for `icmp=true` vs `icmp=false` in the startup log line to confirm whether
+  ICMP translation is actually active.

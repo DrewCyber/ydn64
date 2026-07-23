@@ -18,11 +18,11 @@ import (
 // YggdrasilNIC is a gVisor LinkEndpoint that routes packets through the
 // Yggdrasil network via ipv6rwc.
 type YggdrasilNIC struct {
-	netstack   *YggdrasilNetstack
-	ipv6rwc    *ipv6rwc.ReadWriteCloser
-	dispatcher stack.NetworkDispatcher
-	readBuf    []byte
-	writeBuf   []byte
+	netstack    *YggdrasilNetstack
+	ipv6rwc     *ipv6rwc.ReadWriteCloser
+	dispatcher  stack.NetworkDispatcher
+	readBuf     []byte
+	writeBuf    []byte
 	ctrlPackets chan *stack.PacketBuffer
 }
 
@@ -33,10 +33,10 @@ func (s *YggdrasilNetstack) NewYggdrasilNIC(ygg *core.Core) tcpip.Error {
 	s.rwc = rwc // expose for direct raw-packet writes (e.g. NAT64 UDP replies)
 	mtu := rwc.MTU()
 	nic := &YggdrasilNIC{
-		netstack:   s,
-		ipv6rwc:    rwc,
-		readBuf:    make([]byte, mtu),
-		writeBuf:   make([]byte, mtu),
+		netstack:    s,
+		ipv6rwc:     rwc,
+		readBuf:     make([]byte, mtu),
+		writeBuf:    make([]byte, mtu),
 		ctrlPackets: make(chan *stack.PacketBuffer, 100),
 	}
 
