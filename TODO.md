@@ -1,4 +1,10 @@
+ - [x] Changelog
+ - [ ] Env variable read for privateKey + -genconf use env vars. (Docker)
  - [ ] Config cleanup
- - [ ] CGO_ENABLED
- - [ ] DNS params tests
  - [ ] Alfis dns zone
+ - [ ] extensive DNS config tests
+ - [ ] Build warnings /deprecations
+ - [ ] Reduce release file size
+ - [ ] CGO_ENABLED
+ - [ ] Disable multicast by default
+ - [ ] Nat64 check by RFC list?

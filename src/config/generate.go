@@ -17,9 +17,6 @@ import (
 func Generate() (string, error) {
 	// Generate a fresh yggdrasil NodeConfig (includes a new random key pair).
 	ygCfg := ygconfig.GenerateConfig()
-	// Force TUN-less operation and no admin socket.
-	ygCfg.AdminListen = "none"
-	ygCfg.IfName = "none"
 
 	// Derive node address and pool6 subnet from the generated private key.
 	privKey := ed25519.PrivateKey(ygCfg.PrivateKey)
@@ -77,12 +74,6 @@ func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string) string {
 	sb.WriteString("  # tls://0.0.0.0:0 or tls://[::]:0 to listen on all interfaces.\n")
 	sb.WriteString("  Listen: []\n\n")
 
-	sb.WriteString("  # Listen address for admin connections. Default is to listen for local\n")
-	sb.WriteString("  # connections either on TCP/9001 or a UNIX socket depending on your\n")
-	sb.WriteString("  # platform. Use this value for yggdrasilctl -endpoint=X. To disable\n")
-	sb.WriteString("  # the admin socket, use the value \"none\" instead.\n")
-	sb.WriteString("  AdminListen: none\n\n")
-
 	sb.WriteString("  # Configuration for which interfaces multicast peer discovery should be\n")
 	sb.WriteString("  # enabled on. Regex is a regular expression which is matched against an\n")
 	sb.WriteString("  # interface name, and interfaces use the first configuration that they\n")
@@ -102,15 +93,6 @@ func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string) string {
 	sb.WriteString("  # WARNING: THIS IS NOT A FIREWALL and DOES NOT limit who can reach\n")
 	sb.WriteString("  # open ports or services running on your machine!\n")
 	sb.WriteString("  AllowedPublicKeys: []\n\n")
-
-	sb.WriteString("  # Local network interface name for TUN adapter, or \"auto\" to select\n")
-	sb.WriteString("  # an interface automatically, or \"none\" to run without TUN.\n")
-	sb.WriteString("  IfName: none\n\n")
-
-	sb.WriteString("  # Maximum Transmission Unit (MTU) size for your local TUN interface.\n")
-	sb.WriteString("  # Default is the largest supported size for your platform. The lowest\n")
-	sb.WriteString("  # possible value is 1280.\n")
-	sb.WriteString("  IfMTU: 65535\n\n")
 
 	sb.WriteString("  # By default, nodeinfo contains some defaults including the platform,\n")
 	sb.WriteString("  # architecture and Yggdrasil version. These can help when surveying\n")

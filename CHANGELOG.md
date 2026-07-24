@@ -1,0 +1,21 @@
+# Changelog
+
+All notable changes to `ydn64` are recorded here. This file is updated
+manually (not auto-generated) whenever a change is worth calling out to
+users or future contributors — new features, behavior changes, config
+schema changes, fixed bugs with user-visible impact. Not every commit needs
+an entry; skip pure refactors, typo fixes, or internal test harness changes
+unless they affect users.
+
+Entries are grouped under an unreleased heading until a release is cut, then
+moved under the corresponding version heading.
+
+## [Unreleased]
+
+- Removed `AdminListen`, `IfName`, and `IfMTU` from the `-genconf` template
+  and the sample `ydn64.conf`. All three are dead in this app: `AdminListen`
+  and `IfName` are always force-overridden to `"none"` (no admin socket, no
+  TUN interface by design), and `IfMTU` only affects a real TUN device's
+  MTU, which is never read anywhere in the codebase. Existing config files
+  that still set these keys continue to work unchanged (harmlessly ignored
+  or overridden).

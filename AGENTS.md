@@ -82,7 +82,13 @@ both services (not duplicated per-service).
 
 `AdminListen` and `IfName` are always force-overridden to `"none"` in
 `main.go` regardless of what's in the config file — this app never uses an
-admin socket or a TUN interface by design.
+admin socket or a TUN interface by design. Because of that, both keys (plus
+`IfMTU`, which only affects a real TUN interface's MTU and is never read
+anywhere in this codebase) are intentionally omitted from the generated
+template (`src/config/generate.go`) and the checked-in sample
+[ydn64.conf](ydn64.conf) — they'd be dead/no-op if present. `ygconfig.NodeConfig`
+still recognizes them if an old config sets them explicitly (harmlessly
+overridden right after `Load`), but new configs shouldn't include them.
 
 When changing the config schema:
 - Add the field to `AppConfig` in [src/config/config.go](src/config/config.go)
@@ -135,6 +141,14 @@ HJSON file.
   reference now lives in `src/config/generate.go`'s inline comments and
   README.md's "Configuration" section.
 
+
+## Changelog
+
+[CHANGELOG.md](CHANGELOG.md) is a **manually maintained** file of
+user/contributor-facing highlights — it is not auto-generated from commits.
+Do not update it automatically as part of unrelated tasks. Only add an entry
+when the user explicitly asks to log/record a change (or clearly confirms
+one should be added), and add it under the `## [Unreleased]` heading.
 
 ## Conventions
 
