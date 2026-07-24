@@ -1,28 +1,25 @@
 #!/bin/sh
-# Real-world sanity check, exercising actual internet egress from A instead
-# of the hermetic fake `target` container: B resolves the well-known name
-# `dns.google` through A's DNS64 (forwarded to the real 8.8.8.8 resolver, see
-# test/gen's "dns.google" zone), confirms the synthesised AAAA embeds the
-# real 8.8.8.8 answer, then ping6's that pool6 address from B to exercise
-# NAT64's ICMPv6<->ICMPv4 Echo translation against a real IPv4 host.
+# Real-world DNS64 + NAT64 ICMP check, using A's default (baseline) config:
+# B resolves the well-known name `dns.google` through A's DNS64 (forwarded
+# to a real public resolver per the default "." zone — see test/gen),
+# confirms the synthesised AAAA embeds a real dns.google answer, then
+# ping6's that pool6 address from B to exercise NAT64's ICMPv6<->ICMPv4
+# Echo translation against a real IPv4 host.
 #
-# This case requires real internet DNS/ICMP egress from the A container's
-# targetnet interface. If A's environment has no internet access, this case
-# will fail — that is expected and intentional (it is a required case, same
-# as 01-04), not a flake to be relaxed.
+# This case requires real internet DNS/ICMP egress from A's egressnet
+# interface. If A's environment has no internet access, this case will
+# fail — that is expected and intentional, not a flake to be relaxed.
 set -eu
 . "$(dirname -- "$0")/../lib.sh"
 
 : "${DNS64_LISTEN_ADDR:?}" "${NAT64_POOL_PREFIX:?}"
 
-# This case typically runs right after 04's container restarts. A's
-# targetnet egress can take a couple of seconds to settle post-restart (the
-# same class of transient podman/VM networking delay documented in
-# AGENTS.md), so retry the initial lookup a few times before treating an
-# empty answer as a real failure.
+# B's yggnet peering being "up" doesn't guarantee the UDP path to A's DNS64
+# listener through the gVisor netstack is immediately ready right after a
+# fresh container start — retry a few times before failing.
 answer=""
 n=0
-while [ "$n" -lt 5 ]; do
+while [ "$n" -lt 10 ]; do
   answer=$($PODMAN exec "$CT_B" dig "@${DNS64_LISTEN_ADDR}" AAAA dns.google +short +time=5 +tries=2 | grep -v '^;' | grep -v '^$' | tail -1)
   [ -n "$answer" ] && break
   n=$((n + 1))

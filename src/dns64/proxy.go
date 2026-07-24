@@ -189,7 +189,7 @@ func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string
 	}
 
 	answer := p.filterAAAA(upResp.Answer, z)
-	if len(answer) > 0 {
+	if containsAAAA(answer) {
 		p.cache.set(q.Name, answer)
 		resp := new(dns.Msg)
 		req.CopyTo(resp)
@@ -232,6 +232,20 @@ func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string
 	return resp, nil
 }
 
+// containsAAAA reports whether rrs contains at least one actual AAAA
+// record (as opposed to only accompanying records like CNAME). A CNAME
+// chain with no usable AAAA at the end is not a real answer — handleAAAA
+// must fall through to A-record synthesis in that case rather than
+// returning the bare CNAME as if it were a successful DNS64 answer.
+func containsAAAA(rrs []dns.RR) bool {
+	for _, rr := range rrs {
+		if _, ok := rr.(*dns.AAAA); ok {
+			return true
+		}
+	}
+	return false
+}
+
 // filterAAAA selects AAAA records from rrs according to zone rules:
 //   - Unspecified (::) is handled by InvalidAddress policy.
 //   - AAAA passes through only if zone.returnIPv6Addresses (this covers
@@ -239,6 +253,11 @@ func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string
 //     for that range, it's just another IPv6 answer gated by the flag).
 //   - Mutually exclusive: zone.prefix and zone.returnIPv6Addresses are
 //     validated at config load time.
+//   - Non-AAAA records (e.g. CNAME) are passed through unchanged, but a
+//     CNAME alone (in a prefix-synthesis zone where the real AAAA is
+//     intentionally filtered out) does NOT count as a usable answer — see
+//     containsAAAA, used by the caller to decide whether to fall through
+//     to A-record synthesis.
 func (p *proxy) filterAAAA(rrs []dns.RR, z *zone) []dns.RR {
 	out := make([]dns.RR, 0, len(rrs))
 	for _, rr := range rrs {

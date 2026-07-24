@@ -5,12 +5,12 @@
  - [x] Reduce release file size
  - [x] Github build warnings /deprecations
  - [x] Alfis dns zone + tests
- - [ ] SIGHUP support for config reload
- - [ ] Rework test environment
- - [ ] TCP socket for dns64 (especially for ANY)
+ - [x] Rework test environment
+ - [x] TCP socket for dns64 (especially for ANY)
  - [ ] End2end DNS config tests
  - [ ] CGO_ENABLED
  - [ ] Nat64 check by RFCs list
  - [ ] dns64 check by RFCs list
  - [ ] unprivileged ICMP fallback
  - [ ] HOWTO: client side config examples (android, macos, win ..)
+ - [?] SIGHUP support for config reload

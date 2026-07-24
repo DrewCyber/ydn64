@@ -137,19 +137,14 @@ func main() {
 		merged["Dns64CacheExpiration"] = 300
 		merged["Dns64CachePurge"] = 600
 		merged["Dns64InvalidAddress"] = *dns64Invalid
+		// Default (catch-all) zone: synthesise AAAA records from real A
+		// records using the NAT64 prefix, forwarding to Dns64Default (a
+		// real public resolver, 8.8.8.8:53 by default) — matches the
+		// checked-in top-level ydn64.conf's default zone. There is no local
+		// fake target anymore: every test case that needs a name to resolve
+		// uses a real-world one (e.g. dns.google) and goes through real
+		// internet/Yggdrasil egress from A.
 		zones := []map[string]interface{}{
-			// Real-world escape hatch used only by
-			// test/cases/05_real_world_icmp.sh: dns.google is forwarded to
-			// Google's real public resolver instead of the hermetic fake
-			// target, so that case can validate NAT64/DNS64 against an
-			// actual internet host. Every other test queries only
-			// target.test, which still resolves entirely through the
-			// catch-all zone below via the offline fake target container.
-			{
-				"domains":   []string{"dns.google"},
-				"forwarder": "8.8.8.8:53",
-				"prefix":    pool6Prefix,
-			},
 			{
 				"domains":               []string{"."},
 				"return-ipv4-addresses": false,
@@ -157,8 +152,8 @@ func main() {
 			},
 		}
 		if *yggZone {
-			// Real-world escape hatch used only by
-			// test/cases/06_ygg_zone_resolution.sh: forwards .ygg queries to
+			// Real-world escape hatch used by
+			// test/cases/03_ygg_zone_resolution.sh: forwards .ygg queries to
 			// a real Alfis DNS server over the actual Yggdrasil network (see
 			// -peers), so that case can validate zone forwarding and
 			// return-ipv6-addresses against a genuine 200::/7 answer.

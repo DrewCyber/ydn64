@@ -12,6 +12,27 @@ moved under the corresponding version heading.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-24
+
+- **Fixed a DNS64 bug causing `DNS_PROBE_FINISHED_BAD_CONFIG`-style failures
+  for CNAME-chained domains** (e.g. `passport.ya.ru` → CNAME →
+  `passport.yandex.ru`, which has a real AAAA record). `handleAAAA()` in
+  `src/dns64/proxy.go` treated any non-empty filtered answer as a
+  successful AAAA response, but `filterAAAA()` passes CNAME records through
+  unconditionally even in prefix-synthesis zones where real AAAA records
+  are intentionally dropped — so a CNAME-only answer was wrongly returned
+  as "done", giving clients a response with a CNAME and no address at all.
+  Fixed by requiring at least one real AAAA record (not just any RR) before
+  short-circuiting, so CNAME-only answers now correctly fall through to
+  A-record-based DNS64 synthesis.
+- Test harness (`test/`) reworked: removed the fake `target`
+  container/network in favor of real internet/Yggdrasil egress from `A` for
+  all lookups; cases renumbered/renamed
+  (`01_peering.sh`, `02_dns_google_icmp.sh`, `03_ygg_zone_resolution.sh`,
+  `04_dns64_any_query.sh`, `05_allowed_sources_config_change.sh`); added a
+  `./run.sh case <name>` command for standalone case debugging with
+  automatic config snapshot/restore between runs.
+
 ## [0.2.0] - 2026-07-24
 
 - DNS64 now handles query type `ANY` explicitly: it's treated like `AAAA`

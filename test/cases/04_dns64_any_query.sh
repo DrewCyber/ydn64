@@ -8,16 +8,14 @@
 # 1. howto.ygg (.ygg zone, forwarder = real Alfis DNS, no prefix,
 #    return-ipv6-addresses: true) — an ANY query must answer with AAAA
 #    record(s) only.
-# 2. dns.google (falls into the default "." catch-all zone in the checked-in
-#    ydn64.conf; the test harness additionally pins a dedicated zone for it
-#    forwarding to real 8.8.8.8 — see test/gen — but either way
+# 2. dns.google (falls into the default "." catch-all zone;
 #    return-ipv4-addresses is false and a prefix is configured) — an ANY
 #    query must answer with synthesised AAAA record(s) only, never a real
 #    A record.
 #
 # This case requires real internet + real Yggdrasil network egress from the
-# A container (same as cases 05/06) and runs after 06 restores A's original
-# config (with the .ygg zone present).
+# A container (same as case 02/03) and runs against A's default/baseline
+# config (no config changes made).
 set -eu
 . "$(dirname -- "$0")/../lib.sh"
 
@@ -36,14 +34,14 @@ assert_only_aaaa() {
 }
 
 # dig_any_retry <name> — retries an ANY query a few times, same pattern as
-# cases 02/05/06 for real-network convergence after 06's restarts. dig
-# writes its own connection-error diagnostics (e.g. "connection refused",
-# "no servers could be reached", or — when +tries=2's first UDP attempt
-# times out but the retransmit succeeds — "communications error ... timed
-# out") to stdout rather than stderr, interleaved with any real answer
+# other real-world cases for network convergence right after container
+# start. dig writes its own connection-error diagnostics (e.g. "connection
+# refused", "no servers could be reached", or — when +tries=2's first UDP
+# attempt times out but the retransmit succeeds — "communications error ...
+# timed out") to stdout rather than stderr, interleaved with any real answer
 # lines. So a plain non-empty-string check on `+noall +answer` output isn't
 # enough: it must also (a) check dig's own exit status, since a transient
-# "DNS64 UDP path not ready yet right after a restart" error must not be
+# "DNS64 UDP path not ready yet right after start" error must not be
 # mistaken for a (bogus) successful answer, and (b) strip dig's own ";;"
 # diagnostic/comment lines even on success, since dig can print a stale
 # "timed out" warning for an earlier retransmit attempt even though the
