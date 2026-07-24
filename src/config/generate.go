@@ -83,7 +83,7 @@ func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string) string {
 	sb.WriteString("  # https://yggdrasil-network.github.io/configurationref.html#multicastinterfaces\n")
 	sb.WriteString("  # for more supported options.\n")
 	sb.WriteString("  MulticastInterfaces: [\n")
-	sb.WriteString("    {\n      Regex: .*\n      Beacon: true\n      Listen: true\n      Password: \"\"\n    }\n")
+	sb.WriteString("    {\n      Regex: .*\n      Beacon: false\n      Listen: true\n      Password: \"\"\n    }\n")
 	sb.WriteString("  ]\n\n")
 
 	sb.WriteString("  # List of peer public keys to allow incoming peering connections\n")

@@ -1,10 +1,10 @@
  - [x] Changelog
+ - [x] Config cleanup
+ - [x] Disable multicast by default
  - [ ] Env variable read for privateKey + -genconf use env vars. (Docker)
- - [ ] Config cleanup
- - [ ] Alfis dns zone
- - [ ] extensive DNS config tests
- - [ ] Build warnings /deprecations
+ - [ ] Alfis dns zone + tests
+ - [ ] End2end DNS config tests
+ - [ ] Github build warnings /deprecations
  - [ ] Reduce release file size
  - [ ] CGO_ENABLED
- - [ ] Disable multicast by default
  - [ ] Nat64 check by RFC list?
