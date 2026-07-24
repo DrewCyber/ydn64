@@ -115,6 +115,24 @@ func (p *proxy) handle(req *dns.Msg) *dns.Msg {
 	switch q.Qtype {
 	case dns.TypeAAAA:
 		resp, err = p.handleAAAA(req, &q, z, server)
+	case dns.TypeANY:
+		// ydn64 only ever serves IPv6-only clients, so a raw ANY answer
+		// containing real A records would be unusable to them anyway.
+		// Reuse the AAAA synthesis/filter path (respecting the zone's
+		// return-ipv4-addresses/return-ipv6-addresses/prefix rules)
+		// instead of blindly passing through whatever the upstream
+		// resolver returns for ANY (which varies wildly — some upstreams
+		// apply RFC 8482 and reply with a bare HINFO record). The upstream
+		// query itself must ask for AAAA, not ANY — handleAAAA uses q's
+		// Qtype verbatim when building its upstream query, so an
+		// unmodified ANY question here would leak straight through as an
+		// upstream ANY query instead of triggering real AAAA synthesis.
+		aaaaQ := q
+		aaaaQ.Qtype = dns.TypeAAAA
+		resp, err = p.handleAAAA(req, &aaaaQ, z, server)
+		if resp != nil {
+			resp.Question[0].Qtype = dns.TypeANY
+		}
 	case dns.TypeA:
 		resp, err = p.handleA(req, &q, z, server)
 	case dns.TypePTR:

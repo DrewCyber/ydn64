@@ -5,9 +5,9 @@
  - [x] Reduce release file size
  - [x] Github build warnings /deprecations
  - [x] Alfis dns zone + tests
+ - [ ] TCP socket for dns64 (especially for ANY)
  - [ ] End2end DNS config tests
  - [ ] CGO_ENABLED
- - [ ] Nat64 check by RFC list?
+ - [ ] Nat64 check by RFCs list?
  - [ ] unprivileged ICMP fallback
- - [ ] HOWTO: client side config examples
- - [ ] RFCs check
+ - [ ] HOWTO: client side config examples (android, macos, win ..)

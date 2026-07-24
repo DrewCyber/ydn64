@@ -12,6 +12,12 @@ moved under the corresponding version heading.
 
 ## [Unreleased]
 
+- DNS64 now handles query type `ANY` explicitly: it's treated like `AAAA`
+  (synthesis/filtering per the zone's `return-ipv4-addresses` /
+  `return-ipv6-addresses` / `prefix` rules) instead of being blindly passed
+  through to the upstream resolver, whose raw `ANY` behavior varies widely
+  (e.g. some upstreams reply with a bare RFC 8482 HINFO record).
+
 ## [0.1.1] - 2026-07-24
 
 - **Removed the 200::/7 special-case** in DNS64: zones no longer get
