@@ -12,11 +12,19 @@ moved under the corresponding version heading.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-24
+
 - DNS64 now handles query type `ANY` explicitly: it's treated like `AAAA`
   (synthesis/filtering per the zone's `return-ipv4-addresses` /
   `return-ipv6-addresses` / `prefix` rules) instead of being blindly passed
   through to the upstream resolver, whose raw `ANY` behavior varies widely
   (e.g. some upstreams reply with a bare RFC 8482 HINFO record).
+- DNS64 now also listens on **TCP**, in addition to UDP, on the same
+  configured listen address/port — matching how mature DNS servers (BIND,
+  Unbound, etc.) serve both transports by default. This is needed because
+  some clients (e.g. `dig`) send certain query types, like `ANY`, over TCP
+  by default; such queries previously got a bare TCP connection refusal
+  since only UDP was served.
 
 ## [0.1.1] - 2026-07-24
 

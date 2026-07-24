@@ -18,6 +18,12 @@ import (
 	"github.com/DrewCyber/ydn64/src/netstack"
 )
 
+// dnsTCPIdleTimeout bounds how long a DNS-over-TCP connection may sit idle
+// between queries before the server closes it — the same defense against
+// resource-exhausting idle connections that mature DNS servers (BIND,
+// Unbound, etc.) apply to their own TCP listeners.
+const dnsTCPIdleTimeout = 10 * time.Second
+
 // Service is the embedded DNS64 server.
 type Service struct {
 	proxy       *proxy
@@ -73,8 +79,12 @@ func (s *Service) isAllowed(ip net.IP) bool {
 	return false
 }
 
-// Start binds a UDP socket on the gVisor stack at the configured listen
-// address and begins serving DNS64 queries.
+// Start binds both a UDP and a TCP socket on the gVisor stack at the
+// configured listen address and begins serving DNS64 queries on both —
+// mirroring how mature DNS servers listen on both transports by default:
+// UDP for ordinary queries, TCP for large/truncated responses and for any
+// query a client sends over TCP outright (e.g. `dig`'s own default
+// transport for ANY queries).
 func (s *Service) Start(ctx context.Context, logger *log.Logger) error {
 	host, portStr, err := net.SplitHostPort(s.listenAddr)
 	if err != nil {
@@ -108,19 +118,27 @@ func (s *Service) Start(ctx context.Context, logger *log.Logger) error {
 	}
 
 	localUDPAddr := &net.UDPAddr{IP: ipv6Addr, Port: port}
-	conn, err := gonetListenUDP(s.ns.Stack(), localUDPAddr)
+	udpConn, err := gonetListenUDP(s.ns.Stack(), localUDPAddr)
 	if err != nil {
 		return fmt.Errorf("dns64: binding UDP on %s: %w", s.listenAddr, err)
 	}
 
-	logger.Printf("DNS64 started  listen=%s  sources=%v", s.listenAddr, s.allowedNets)
+	tcpListener, err := gonetListenTCP(s.ns.Stack(), ipv6Addr, port)
+	if err != nil {
+		udpConn.Close()
+		return fmt.Errorf("dns64: binding TCP on %s: %w", s.listenAddr, err)
+	}
+
+	logger.Printf("DNS64 started  listen=%s (udp+tcp)  sources=%v", s.listenAddr, s.allowedNets)
 
 	go func() {
 		<-ctx.Done()
-		conn.Close()
+		udpConn.Close()
+		tcpListener.Close()
 	}()
 
-	go s.serveUDP(conn, logger)
+	go s.serveUDP(udpConn, logger)
+	go s.serveTCP(tcpListener, logger)
 	return nil
 }
 
@@ -132,6 +150,17 @@ func gonetListenUDP(st *stack.Stack, addr *net.UDPAddr) (*gonet.UDPConn, error) 
 		Port: uint16(addr.Port),
 	}
 	return gonet.DialUDP(st, &fa, nil, ipv6.ProtocolNumber)
+}
+
+// gonetListenTCP opens a TCP listening socket on the gVisor stack bound to
+// ip:port.
+func gonetListenTCP(st *stack.Stack, ip net.IP, port int) (*gonet.TCPListener, error) {
+	fa := tcpip.FullAddress{
+		NIC:  1,
+		Addr: tcpip.AddrFromSlice(ip.To16()),
+		Port: uint16(port),
+	}
+	return gonet.ListenTCP(st, fa, ipv6.ProtocolNumber)
 }
 
 // serveUDP reads DNS queries from conn and dispatches them in goroutines.
@@ -173,5 +202,53 @@ func (s *Service) serveUDP(conn *gonet.UDPConn, logger *log.Logger) {
 				logger.Debugf("DNS64: write error to %s: %v", from, err)
 			}
 		}(pkt, addr)
+	}
+}
+
+// serveTCP accepts DNS-over-TCP connections and dispatches each to its own
+// goroutine. Source filtering mirrors serveUDP; per-message framing (the
+// 2-byte length prefix required by RFC 1035 §4.2.2) is handled by wrapping
+// each connection in a dns.Conn.
+func (s *Service) serveTCP(listener *gonet.TCPListener, logger *log.Logger) {
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			// listener was closed (ctx cancelled) or fatal error.
+			return
+		}
+
+		var srcIP net.IP
+		if tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
+			srcIP = tcpAddr.IP
+		}
+		if srcIP == nil || !s.isAllowed(srcIP) {
+			logger.Debugf("DNS64: denied TCP connection from %s (not in AllowedSources)", conn.RemoteAddr())
+			conn.Close()
+			continue
+		}
+
+		go s.serveTCPConn(conn, logger)
+	}
+}
+
+// serveTCPConn serves queries for a single DNS-over-TCP connection one at a
+// time (RFC 7766 permits, but does not require, pipelining), closing the
+// connection once dnsTCPIdleTimeout elapses without a new query.
+func (s *Service) serveTCPConn(conn net.Conn, logger *log.Logger) {
+	defer conn.Close()
+	dc := &dns.Conn{Conn: conn}
+	for {
+		conn.SetReadDeadline(time.Now().Add(dnsTCPIdleTimeout))
+		req, err := dc.ReadMsg()
+		if err != nil {
+			return
+		}
+		logger.Debugf("DNS64: TCP query from %s", conn.RemoteAddr())
+
+		resp := s.proxy.handle(req)
+		if err := dc.WriteMsg(resp); err != nil {
+			logger.Debugf("DNS64: TCP write error to %s: %v", conn.RemoteAddr(), err)
+			return
+		}
 	}
 }

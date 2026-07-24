@@ -8,6 +8,7 @@
  - [ ] TCP socket for dns64 (especially for ANY)
  - [ ] End2end DNS config tests
  - [ ] CGO_ENABLED
- - [ ] Nat64 check by RFCs list?
+ - [ ] Nat64 check by RFCs list
+ - [ ] dns64 check by RFCs list
  - [ ] unprivileged ICMP fallback
  - [ ] HOWTO: client side config examples (android, macos, win ..)
