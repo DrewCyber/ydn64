@@ -73,6 +73,36 @@ docker run -d \
 
 `--cap-add=NET_RAW` is optional but recommended — see below.
 
+### Running with no config file/volume at all
+
+A third variable, `YDN64_PRIVATE_KEY`, overrides the node's identity itself
+(a hex-encoded ed25519 private key, e.g. copied from the `PrivateKey` line of
+a previously generated config). When it's set, `Nat64Pool`, `Dns64Listen`,
+and `Dns64Zones` are automatically recomputed to match — any custom
+`Dns64Zones` in the mounted config are replaced with the single default
+synthesis zone in this case, so use a persisted config file instead if you
+need custom DNS64 zones.
+
+With all three variables set, you can run a fully working node with no
+mounted config file or volume at all — [docker-entrypoint.sh](docker-entrypoint.sh)
+will generate one in-container via `ydn64 -genconf` (which also bakes these
+same env vars into the generated file) and immediately apply the same
+overrides at startup:
+
+```sh
+docker run -d \
+  --name ydn64 \
+  -e YDN64_PRIVATE_KEY="<64-byte hex private key>" \
+  -e YDN64_PEERS="tls://a.b.c.d:e, tls://f.g.h.i:j" \
+  -e YDN64_ALLOWED_SOURCES="200::/7" \
+  --cap-add=NET_RAW \
+  ghcr.io/drewcyber/ydn64:latest
+```
+
+If a config file already exists at `$YDN64_CONFIG`, the entrypoint leaves it
+as-is (env var overrides still apply on top of it) — this only matters for
+the very first run.
+
 ## ICMP NAT64 and `CAP_NET_RAW`
 
 NAT64's ICMP Echo translation opens a raw ICMPv4 socket

@@ -11,19 +11,30 @@ import (
 	ygconfig "github.com/yggdrasil-network/yggdrasil-go/src/config"
 )
 
-// Generate returns a freshly generated, single merged ydn64.conf HJSON
-// document (new key pair, pre-derived pool6 address) as a string, ready to
-// be printed to stdout.
-func Generate() (string, error) {
-	// Generate a fresh yggdrasil NodeConfig (includes a new random key pair).
-	ygCfg := ygconfig.GenerateConfig()
+// ParsePrivateKeyHex decodes and validates a hex-encoded ed25519 private
+// key, as used by the PrivateKey config field and the YDN64_PRIVATE_KEY
+// environment variable override.
+func ParsePrivateKeyHex(s string) (ed25519.PrivateKey, error) {
+	raw, err := hex.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("invalid private key hex: %w", err)
+	}
+	if len(raw) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("invalid private key length: got %d bytes, want %d", len(raw), ed25519.PrivateKeySize)
+	}
+	return ed25519.PrivateKey(raw), nil
+}
 
-	// Derive node address and pool6 subnet from the generated private key.
-	privKey := ed25519.PrivateKey(ygCfg.PrivateKey)
+// DeriveFromPrivateKey derives the node's Yggdrasil address and its NAT64
+// /96 pool prefix from a raw ed25519 private key. It is used both by
+// -genconf (with a freshly generated key) and at runtime when PrivateKey is
+// overridden via YDN64_PRIVATE_KEY, so Nat64Pool/Dns64Listen/Dns64Zones can
+// be kept consistent with whatever key is actually in effect.
+func DeriveFromPrivateKey(privKey ed25519.PrivateKey) (nodeIP string, pool6CIDR string, pool6Prefix string) {
 	pubKey := privKey.Public().(ed25519.PublicKey)
 
 	nodeAddr := address.AddrForKey(pubKey) // *address.Address = *[16]byte
-	nodeIP := net.IP(nodeAddr[:])
+	nodeIP = net.IP(nodeAddr[:]).String()
 
 	// address.Subnet is [8]byte — the /64 prefix bytes for this node's subnet.
 	subnet := address.SubnetForKey(pubKey) // *address.Subnet = *[8]byte
@@ -31,15 +42,78 @@ func Generate() (string, error) {
 	// Build the /96 pool6 prefix: 8 subnet bytes + 8 zero bytes → /96 subnet.
 	pool6IP := make(net.IP, net.IPv6len) // 16 zero bytes
 	copy(pool6IP, subnet[:])             // first 8 bytes from subnet prefix
-	pool6CIDR := fmt.Sprintf("%s/96", pool6IP.String())
-	pool6Prefix := pool6IP.String() // e.g. "301:363a:9499:c858::"
+	pool6CIDR = fmt.Sprintf("%s/96", pool6IP.String())
+	pool6Prefix = pool6IP.String() // e.g. "301:363a:9499:c858::"
 
-	privKeyHex := hex.EncodeToString(ygCfg.PrivateKey)
-
-	return buildConf(privKeyHex, nodeIP.String(), pool6CIDR, pool6Prefix), nil
+	return nodeIP, pool6CIDR, pool6Prefix
 }
 
-func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string) string {
+// GenerateOverrides holds optional values, normally sourced from the
+// YDN64_PRIVATE_KEY / YDN64_PEERS / YDN64_ALLOWED_SOURCES environment
+// variables, to bake into a freshly generated config instead of the usual
+// random key / empty peers / placeholder AllowedSources entry. This lets a
+// container started with all three variables set produce a fully
+// pre-configured config file via `-genconf` with no further editing.
+type GenerateOverrides struct {
+	PrivateKeyHex  string   // hex-encoded ed25519 private key; empty = generate a new random key
+	Peers          []string // empty = no peers (Peers: [])
+	AllowedSources []string // empty = placeholder example entry
+}
+
+// Generate returns a freshly generated, single merged ydn64.conf HJSON
+// document (pre-derived pool6 address) as a string, ready to be printed to
+// stdout. Any non-empty field in overrides replaces the corresponding
+// default/random value.
+func Generate(overrides GenerateOverrides) (string, error) {
+	var privKey ed25519.PrivateKey
+	if overrides.PrivateKeyHex != "" {
+		pk, err := ParsePrivateKeyHex(overrides.PrivateKeyHex)
+		if err != nil {
+			return "", err
+		}
+		privKey = pk
+	} else {
+		// Generate a fresh yggdrasil NodeConfig (includes a new random key pair).
+		ygCfg := ygconfig.GenerateConfig()
+		privKey = ed25519.PrivateKey(ygCfg.PrivateKey)
+	}
+
+	nodeIP, pool6CIDR, pool6Prefix := DeriveFromPrivateKey(privKey)
+	privKeyHex := hex.EncodeToString(privKey)
+
+	return buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix, overrides.Peers, overrides.AllowedSources), nil
+}
+
+// formatPeersHJSON renders the Peers list the same way as the hand-written
+// sample config (one unquoted URI per line), or "[]" if empty.
+func formatPeersHJSON(peers []string) string {
+	if len(peers) == 0 {
+		return "[]"
+	}
+	var b strings.Builder
+	b.WriteString("[\n")
+	for _, p := range peers {
+		b.WriteString(fmt.Sprintf("    %s\n", p))
+	}
+	b.WriteString("  ]")
+	return b.String()
+}
+
+// formatAllowedSourcesHJSON renders the AllowedSources list inline, quoting
+// each entry. If empty, it falls back to the previous placeholder example
+// so -genconf output without an override still shows users what to edit.
+func formatAllowedSourcesHJSON(sources []string) string {
+	if len(sources) == 0 {
+		return `["200:aaaa:bbbb:cccc:dddd:eeee:ffff:1234/128"]`
+	}
+	quoted := make([]string, len(sources))
+	for i, s := range sources {
+		quoted[i] = fmt.Sprintf("%q", s)
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
+}
+
+func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string, peers, allowedSources []string) string {
 	var sb strings.Builder
 
 	sb.WriteString("{\n")
@@ -57,7 +131,7 @@ func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string) string {
 	sb.WriteString("  # nearby nodes that have good connectivity and low latency. Avoid adding\n")
 	sb.WriteString("  # peers to this list from distant countries as this will worsen your\n")
 	sb.WriteString("  # node's connectivity and performance considerably.\n")
-	sb.WriteString("  Peers: []\n\n")
+	sb.WriteString(fmt.Sprintf("  Peers: %s\n\n", formatPeersHJSON(peers)))
 
 	sb.WriteString("  # List of connection strings for outbound peer connections in URI format,\n")
 	sb.WriteString("  # arranged by source interface, e.g. { \"eth0\": [ \"tls://a.b.c.d:e\" ] }.\n")
@@ -109,7 +183,7 @@ func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string) string {
 	sb.WriteString("  # Shared allowed source filter for both NAT64 and DNS64 services.\n")
 	sb.WriteString("  # CIDR notation or individual IPv6 addresses.\n")
 	sb.WriteString("  # AllowedSources: [\"200::/7\"]\n")
-	sb.WriteString("  AllowedSources: [\"200:aaaa:bbbb:cccc:dddd:eeee:ffff:1234/128\"]\n\n")
+	sb.WriteString(fmt.Sprintf("  AllowedSources: %s\n\n", formatAllowedSourcesHJSON(allowedSources)))
 
 	sb.WriteString("  # Enable NAT64 service. If false, the NAT64 service will not be started.\n")
 	sb.WriteString("  Nat64Enable: true\n\n")

@@ -15,6 +15,7 @@ import (
 	"github.com/gologme/log"
 	gsyslog "github.com/hashicorp/go-syslog"
 	"github.com/yggdrasil-network/yggdrasil-go/src/admin"
+	ygconfig "github.com/yggdrasil-network/yggdrasil-go/src/config"
 	"github.com/yggdrasil-network/yggdrasil-go/src/core"
 	"github.com/yggdrasil-network/yggdrasil-go/src/multicast"
 
@@ -81,7 +82,17 @@ func main() {
 	}
 
 	if *genconf {
-		content, err := config.Generate()
+		// If all three environment variables are set, bake them into the
+		// generated config so a container can boot with a fully
+		// pre-configured identity/peers/allowlist without any manual
+		// editing afterwards. Any subset left unset falls back to the
+		// usual random key / empty peers / placeholder AllowedSources.
+		overrides := config.GenerateOverrides{
+			PrivateKeyHex:  os.Getenv("YDN64_PRIVATE_KEY"),
+			Peers:          splitEnvList(os.Getenv("YDN64_PEERS")),
+			AllowedSources: splitEnvList(os.Getenv("YDN64_ALLOWED_SOURCES")),
+		}
+		content, err := config.Generate(overrides)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "genconf error:", err)
 			os.Exit(1)
@@ -130,9 +141,28 @@ func main() {
 
 	// ── Environment variable overrides (container-friendly) ──────────────────
 	// Lets a Docker/Podman container built from a single generated config
-	// (identity, Nat64Pool, Dns64Listen, ...) still be pointed at real peers
-	// and locked down to the operator's own Yggdrasil address without baking
-	// either into the image or hand-editing the mounted config file.
+	// still be pointed at real peers and locked down to the operator's own
+	// Yggdrasil address without baking either into the image or hand-editing
+	// the mounted config file. YDN64_PRIVATE_KEY additionally lets the whole
+	// node identity (and everything derived from it: Nat64Pool, Dns64Listen,
+	// Dns64Zones) be supplied entirely via environment variables, so a
+	// container can run without any config file/volume at all.
+	if pk := os.Getenv("YDN64_PRIVATE_KEY"); pk != "" {
+		privKey, err := config.ParsePrivateKeyHex(pk)
+		if err != nil {
+			logger.Fatalf("YDN64_PRIVATE_KEY override invalid: %v", err)
+		}
+		ygCfg.PrivateKey = ygconfig.KeyBytes(privKey)
+		if err := ygCfg.GenerateSelfSignedCertificate(); err != nil {
+			logger.Fatalf("YDN64_PRIVATE_KEY override: failed to regenerate certificate: %v", err)
+		}
+		nodeIP, pool6CIDR, pool6Prefix := config.DeriveFromPrivateKey(privKey)
+		appCfg.ApplyPrivateKeyOverride(nodeIP, pool6CIDR, pool6Prefix)
+		if err := appCfg.Validate(); err != nil {
+			logger.Fatalf("config invalid after YDN64_PRIVATE_KEY override: %v", err)
+		}
+		logger.Infof("YDN64_PRIVATE_KEY override: node address %s, Nat64Pool %s", nodeIP, appCfg.Nat64Pool)
+	}
 	if peers := os.Getenv("YDN64_PEERS"); peers != "" {
 		ygCfg.Peers = splitEnvList(peers)
 		logger.Infof("YDN64_PEERS override: %d peer(s)", len(ygCfg.Peers))

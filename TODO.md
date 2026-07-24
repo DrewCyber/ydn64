@@ -1,10 +1,11 @@
  - [x] Changelog
  - [x] Config cleanup
  - [x] Disable multicast by default
- - [ ] Env variable read for privateKey + -genconf use env vars. (Docker)
+ - [x] Env variable read for privateKey + -genconf use env vars. (Docker)
  - [ ] Alfis dns zone + tests
  - [ ] End2end DNS config tests
  - [ ] Github build warnings /deprecations
  - [ ] Reduce release file size
  - [ ] CGO_ENABLED
  - [ ] Nat64 check by RFC list?
+ - [ ] unprivileged ICMP fallback

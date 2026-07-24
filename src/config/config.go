@@ -58,6 +58,25 @@ type AppConfig struct {
 	Dns64Zones           []ZoneConfig `json:"Dns64Zones"`
 }
 
+// ApplyPrivateKeyOverride recomputes Nat64Pool and Dns64Listen, and resets
+// Dns64Zones to a single default synthesis zone, using addresses derived
+// from an overridden PrivateKey (nodeIP, pool6CIDR, pool6Prefix — see
+// DeriveFromPrivateKey). This keeps NAT64/DNS64 addressing consistent when
+// PrivateKey is overridden at runtime (e.g. via YDN64_PRIVATE_KEY) instead
+// of read as-is from the config file, discarding any custom Dns64Zones in
+// favor of the single default zone.
+func (c *AppConfig) ApplyPrivateKeyOverride(nodeIP, pool6CIDR, pool6Prefix string) {
+	c.Nat64Pool = pool6CIDR
+	c.Dns64Listen = fmt.Sprintf("[%s]:53", nodeIP)
+	c.Dns64Zones = []ZoneConfig{
+		{
+			Domains:          []string{"."},
+			ReturnPublicIPv4: false,
+			Prefix:           pool6Prefix,
+		},
+	}
+}
+
 // NAT64 returns the NAT64Config view of the merged configuration.
 func (c *AppConfig) NAT64() NAT64Config {
 	return NAT64Config{

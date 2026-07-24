@@ -119,18 +119,30 @@ docker-entrypoint.sh    generates ydn64.conf on first run if $YDN64_CONFIG is mi
 
 ### Container env var overrides
 
-`cmd/ydn64/main.go` applies `YDN64_PEERS` / `YDN64_ALLOWED_SOURCES`
-environment variables as overrides on top of the loaded config file,
-immediately after `config.Load(...)` and before the Yggdrasil core is
-constructed (Peers must be set before `core.New`; AllowedSources is
-re-validated via the now-exported `AppConfig.Validate()`). This exists
-specifically for the Docker image (see [docker-entrypoint.sh](docker-entrypoint.sh)
-and README's "Running with Docker" section) so a container can boot from a
-freshly-`-genconf`'d file without baking peers/allowed-sources into the image
-or requiring users to hand-edit a mounted config. Values are comma/whitespace
-separated (`splitEnvList` in main.go). If you add more overridable fields,
-follow the same pattern rather than shelling out to sed against the mounted
-HJSON file.
+`cmd/ydn64/main.go` applies `YDN64_PRIVATE_KEY` / `YDN64_PEERS` /
+`YDN64_ALLOWED_SOURCES` environment variables as overrides on top of the
+loaded config file, immediately after `config.Load(...)` and before the
+Yggdrasil core is constructed. `YDN64_PRIVATE_KEY` (hex-encoded ed25519
+private key) is applied first: it replaces `ygCfg.PrivateKey`, regenerates
+`ygCfg.Certificate` via `GenerateSelfSignedCertificate()` (required — the
+`tls.Certificate` passed to `core.New` is what actually determines node
+identity, not `PrivateKey` alone), and calls
+`AppConfig.ApplyPrivateKeyOverride(...)` (in
+[src/config/config.go](src/config/config.go)) to recompute `Nat64Pool` and
+`Dns64Listen` and reset `Dns64Zones` to the single default synthesis zone —
+addresses are derived via `config.DeriveFromPrivateKey` (in
+[src/config/generate.go](src/config/generate.go), shared with `-genconf`).
+`YDN64_PEERS` must be set before `core.New`; `YDN64_ALLOWED_SOURCES` is
+re-validated via `AppConfig.Validate()`. This exists specifically for the
+Docker image (see [docker-entrypoint.sh](docker-entrypoint.sh) and README's
+"Running with Docker" section) so a container can boot from a freshly
+`-genconf`'d file — or with no config file/volume at all when all three vars
+are set — without hand-editing a mounted config. Values are comma/whitespace
+separated for the list-valued vars (`splitEnvList` in main.go). `-genconf`
+itself also reads these same three env vars (via
+`config.GenerateOverrides`) to bake them directly into the generated file.
+If you add more overridable fields, follow the same pattern rather than
+shelling out to sed against the mounted HJSON file.
 
 ### `context/` caveat
 
