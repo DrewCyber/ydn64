@@ -5,6 +5,8 @@
  - [x] Reduce release file size
  - [x] Github build warnings /deprecations
  - [x] Alfis dns zone + tests
+ - [ ] SIGHUP support for config reload
+ - [ ] Rework test environment
  - [ ] TCP socket for dns64 (especially for ANY)
  - [ ] End2end DNS config tests
  - [ ] CGO_ENABLED

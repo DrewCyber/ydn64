@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -14,13 +15,26 @@ import (
 	"github.com/DrewCyber/ydn64/src/netstack"
 )
 
-// proxy implements the DNS64 translation logic.
-type proxy struct {
-	cache          *dnsCache
+// proxyConfig holds the reloadable subset of DNS64 behaviour (Dns64Default,
+// Dns64Zones, Dns64InvalidAddress). It is swapped atomically by
+// proxy.reload() so query-handling goroutines never need to take a lock.
+type proxyConfig struct {
 	zones          []zone
 	defaultForward string
 	ia             InvalidAddress
-	ns             *netstack.YggdrasilNetstack // used to dial Yggdrasil-native (200::/7) forwarders
+}
+
+// proxy implements the DNS64 translation logic.
+type proxy struct {
+	cache *dnsCache
+	cfg   atomic.Pointer[proxyConfig]
+	ns    *netstack.YggdrasilNetstack // used to dial Yggdrasil-native (200::/7) forwarders
+}
+
+// reload atomically replaces the zone table, default forwarder, and
+// InvalidAddress policy. Safe to call concurrently with in-flight queries.
+func (p *proxy) reload(defaultForward string, ia InvalidAddress, zones []zone) {
+	p.cfg.Store(&proxyConfig{zones: zones, defaultForward: defaultForward, ia: ia})
 }
 
 // yggdrasilRange is the Yggdrasil node address space (200::/7). Forwarders
@@ -87,7 +101,7 @@ func (p *proxy) getForwarder(z *zone) string {
 	if z != nil && z.forwarder != "" {
 		return z.forwarder
 	}
-	return p.defaultForward
+	return p.cfg.Load().defaultForward
 }
 
 // handle processes a single DNS request and returns a response message.
@@ -100,7 +114,7 @@ func (p *proxy) handle(req *dns.Msg) *dns.Msg {
 	q := req.Question[0]
 	fqdn := strings.ToLower(q.Name)
 
-	z := matchZone(p.zones, fqdn)
+	z := matchZone(p.cfg.Load().zones, fqdn)
 	if z == nil {
 		// No matching zone and no catch-all → NXDOMAIN.
 		resp := new(dns.Msg)
@@ -236,7 +250,7 @@ func (p *proxy) filterAAAA(rrs []dns.RR, z *zone) []dns.RR {
 		ip := a.AAAA
 
 		if ip.IsUnspecified() {
-			switch p.ia {
+			switch p.cfg.Load().ia {
 			case IADiscard:
 				continue
 			case IAIgnore:
@@ -268,7 +282,7 @@ func (p *proxy) synthesiseFromA(rrs []dns.RR, name string, z *zone) []dns.RR {
 		ipv4 := a.A
 
 		if ipv4.IsUnspecified() {
-			switch p.ia {
+			switch p.cfg.Load().ia {
 			case IADiscard:
 				continue
 			case IAIgnore:
@@ -350,7 +364,7 @@ func (p *proxy) reversePTR(ptrName string) (net.IP, bool) {
 	if err != nil {
 		return nil, false
 	}
-	for _, z := range p.zones {
+	for _, z := range p.cfg.Load().zones {
 		if z.prefix == nil {
 			continue
 		}

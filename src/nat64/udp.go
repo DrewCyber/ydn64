@@ -131,7 +131,7 @@ func (s *Service) udpReplyLoop(sess *udpSession, key sessionKey) {
 	buf := make([]byte, int(s.ns.MTU()))
 	for {
 		// Set a rolling read deadline; reset on each successful read.
-		_ = sess.outConn.SetReadDeadline(time.Now().Add(s.udpTimeout))
+		_ = sess.outConn.SetReadDeadline(time.Now().Add(s.udpTimeout()))
 		n, err := sess.outConn.Read(buf)
 		if err != nil {
 			return // timeout or connection closed

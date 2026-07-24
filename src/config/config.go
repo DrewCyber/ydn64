@@ -77,6 +77,22 @@ func (c *AppConfig) ApplyPrivateKeyOverride(nodeIP, pool6CIDR, pool6Prefix strin
 	}
 }
 
+// ParseAllowedNets converts AllowedSources config entries (bare IPs or
+// CIDRs) into a slice of *net.IPNet, as consumed by nat64.Service and
+// dns64.Service's isAllowed() checks. Invalid entries are silently skipped —
+// AppConfig.Validate() is responsible for rejecting them at load time.
+func ParseAllowedNets(sources []string) []*net.IPNet {
+	var out []*net.IPNet
+	for _, src := range sources {
+		if ip := net.ParseIP(src); ip != nil {
+			out = append(out, &net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)})
+		} else if _, cidr, err := net.ParseCIDR(src); err == nil {
+			out = append(out, cidr)
+		}
+	}
+	return out
+}
+
 // NAT64 returns the NAT64Config view of the merged configuration.
 func (c *AppConfig) NAT64() NAT64Config {
 	return NAT64Config{

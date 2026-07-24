@@ -28,9 +28,8 @@ import (
 //	       socket. Requires CAP_NET_RAW; if unavailable, ICMP translation is
 //	       silently disabled (TCP/UDP are unaffected).
 type Service struct {
-	pool6Net    *net.IPNet
-	allowedNets []*net.IPNet
-	udpTimeout  time.Duration
+	pool6Net *net.IPNet
+	settings atomic.Pointer[nat64Settings]
 
 	ns       *netstack.YggdrasilNetstack
 	sessions sync.Map // sessionKey → *udpSession
@@ -38,6 +37,15 @@ type Service struct {
 	icmpConn     *icmp.PacketConn
 	icmpSessions sync.Map // icmpSessionKey → *icmpSession
 	icmpClosed   atomic.Bool
+}
+
+// nat64Settings holds the subset of NAT64 configuration that can be changed
+// at runtime via Service.Reload() without restarting the service or
+// touching the gVisor stack/pool6 routing (AllowedSources, Nat64UdpTimeout).
+// It is swapped atomically so readers never need to take a lock.
+type nat64Settings struct {
+	allowedNets []*net.IPNet
+	udpTimeout  time.Duration
 }
 
 // NewService creates a NAT64 Service from configuration.
@@ -48,29 +56,37 @@ func NewService(cfg config.NAT64Config, allowedSources []string, ns *netstack.Yg
 		return nil, fmt.Errorf("nat64: invalid pool6 %q: %w", cfg.Pool6, err)
 	}
 
-	var allowed []*net.IPNet
-	for _, src := range allowedSources {
-		if ip := net.ParseIP(src); ip != nil {
-			// Single IP — wrap in a /128 subnet.
-			allowed = append(allowed, &net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)})
-		} else if _, cidr, err := net.ParseCIDR(src); err == nil {
-			allowed = append(allowed, cidr)
-		}
-		// Invalid entries are silently skipped; config.validate() catches them.
+	s := &Service{
+		pool6Net: pool6Net,
+		ns:       ns,
 	}
-
-	return &Service{
-		pool6Net:    pool6Net,
-		allowedNets: allowed,
+	s.settings.Store(&nat64Settings{
+		allowedNets: config.ParseAllowedNets(allowedSources),
 		udpTimeout:  time.Duration(cfg.UDPTimeout) * time.Second,
-		ns:          ns,
-	}, nil
+	})
+	return s, nil
+}
+
+// Reload atomically replaces AllowedSources and Nat64UdpTimeout with new
+// values, e.g. in response to a SIGHUP-triggered config reload. Safe to call
+// concurrently with in-flight traffic; other NAT64 settings (Nat64Pool,
+// Nat64Enable) are not reloadable and require a process restart to change.
+func (s *Service) Reload(cfg config.NAT64Config, allowedSources []string) {
+	s.settings.Store(&nat64Settings{
+		allowedNets: config.ParseAllowedNets(allowedSources),
+		udpTimeout:  time.Duration(cfg.UDPTimeout) * time.Second,
+	})
+}
+
+// udpTimeout returns the current NAT64 UDP session idle timeout.
+func (s *Service) udpTimeout() time.Duration {
+	return s.settings.Load().udpTimeout
 }
 
 // isAllowed reports whether srcIP is in one of the configured allowed-source ranges.
 // An empty allowedNets list means "deny all".
 func (s *Service) isAllowed(ip net.IP) bool {
-	for _, n := range s.allowedNets {
+	for _, n := range s.settings.Load().allowedNets {
 		if n.Contains(ip) {
 			return true
 		}
@@ -107,8 +123,9 @@ func (s *Service) Start(ctx context.Context, logger *log.Logger) {
 	// ── Session cleanup goroutine ────────────────────────────────────────────
 	go s.cleanupSessions(ctx)
 
+	cur := s.settings.Load()
 	logger.Printf("NAT64 started  pool6=%s  udp_timeout=%s  sources=%v  icmp=%v",
-		s.pool6Net, s.udpTimeout, s.allowedNets, s.icmpConn != nil)
+		s.pool6Net, cur.udpTimeout, cur.allowedNets, s.icmpConn != nil)
 }
 
 // interceptPacket dispatches a raw IPv6 packet from the NIC read path to the
@@ -136,8 +153,8 @@ func (s *Service) cleanupSessions(ctx context.Context) {
 	const icmpSessionTimeout = 30 * time.Second
 
 	interval := icmpSessionTimeout / 2
-	if s.udpTimeout > 0 && s.udpTimeout/2 < interval {
-		interval = s.udpTimeout / 2
+	if t := s.udpTimeout(); t > 0 && t/2 < interval {
+		interval = t / 2
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -155,8 +172,8 @@ func (s *Service) cleanupSessions(ctx context.Context) {
 			}
 			return
 		case <-ticker.C:
-			if s.udpTimeout > 0 {
-				cutoff := time.Now().Add(-s.udpTimeout).UnixNano()
+			if t := s.udpTimeout(); t > 0 {
+				cutoff := time.Now().Add(-t).UnixNano()
 				s.sessions.Range(func(k, v any) bool {
 					sess := v.(*udpSession)
 					if sess.lastSeenNs < cutoff {

@@ -2,6 +2,7 @@ package dns64
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -10,8 +11,9 @@ import (
 type dnsCache struct {
 	mu            sync.RWMutex
 	items         map[string]cacheItem
-	defaultExp    time.Duration
+	defaultExp    atomic.Int64 // nanoseconds; read/written via Reload for live config reload
 	purgeInterval time.Duration
+	ticker        *time.Ticker // nil if purgeInterval was 0 at construction (no janitor)
 }
 
 type cacheItem struct {
@@ -22,19 +24,42 @@ type cacheItem struct {
 func newCache(defaultExp, purgeInterval time.Duration) *dnsCache {
 	c := &dnsCache{
 		items:         make(map[string]cacheItem),
-		defaultExp:    defaultExp,
 		purgeInterval: purgeInterval,
 	}
+	c.defaultExp.Store(int64(defaultExp))
 	if purgeInterval > 0 {
+		c.ticker = time.NewTicker(purgeInterval)
 		go c.janitor()
 	}
 	return c
 }
 
+// Reload atomically updates the default expiration (applied to entries
+// cached from now on) and, if a janitor is running, resets its purge
+// interval. It also flushes all currently cached entries: cached AAAA
+// answers are stored post zone-filtering (see proxy.handleAAAA), so a stale
+// entry would otherwise keep serving a pre-reload zone's answer (e.g. a
+// zone's return-ipv6-addresses/prefix) after Dns64Zones or Dns64Default has
+// changed, silently bypassing the new config until the old TTL expired. If
+// the cache was created with purgeInterval == 0 (no janitor), a nonzero
+// purgeInterval here has no effect — starting a janitor after the fact
+// isn't supported, since that's only a config reload nicety, not a
+// correctness requirement.
+func (c *dnsCache) Reload(defaultExp, purgeInterval time.Duration) {
+	c.defaultExp.Store(int64(defaultExp))
+	if c.ticker != nil && purgeInterval > 0 {
+		c.purgeInterval = purgeInterval
+		c.ticker.Reset(purgeInterval)
+	}
+	c.mu.Lock()
+	c.items = make(map[string]cacheItem)
+	c.mu.Unlock()
+}
+
 func (c *dnsCache) set(k string, v interface{}) {
 	var exp int64
-	if c.defaultExp > 0 {
-		exp = time.Now().Add(c.defaultExp).UnixNano()
+	if d := c.defaultExp.Load(); d > 0 {
+		exp = time.Now().Add(time.Duration(d)).UnixNano()
 	}
 	c.mu.Lock()
 	c.items[k] = cacheItem{value: v, expiration: exp}
@@ -55,9 +80,8 @@ func (c *dnsCache) get(k string) (interface{}, bool) {
 }
 
 func (c *dnsCache) janitor() {
-	ticker := time.NewTicker(c.purgeInterval)
-	defer ticker.Stop()
-	for range ticker.C {
+	defer c.ticker.Stop()
+	for range c.ticker.C {
 		now := time.Now().UnixNano()
 		c.mu.Lock()
 		for k, item := range c.items {

@@ -7,15 +7,22 @@
 #    fall inside 200::/7 (Yggdrasil's real address range) — proving
 #    return-ipv6-addresses passes real Yggdrasil-native AAAA answers through
 #    with no special-casing of 200::/7 anywhere in the DNS64 code path.
-# 2. A is restarted with the .ygg zone stripped from its config (test/gen's
-#    -ygg-zone=false) and the same query must now return no AAAA answer.
-#    The always-present "." catch-all zone (needed by target.test in cases
-#    02-04) still technically matches .ygg names, but with return-ipv6
-#    disabled and no A record for howto.ygg from the fake target forwarder,
-#    it can't synthesise or pass through any real address — proving the
-#    .ygg-specific 200::/7 pass-through only happens when that zone exists.
-# 3. A's original config is restored and restarted so a repeat
+# 2. A's config is reloaded (SIGHUP, no restart) with the .ygg zone stripped
+#    from its config (test/gen's -ygg-zone=false) and the same query must
+#    now return no AAAA answer. The always-present "." catch-all zone
+#    (needed by target.test in cases 02-04) still technically matches .ygg
+#    names, but with return-ipv6 disabled and no A record for howto.ygg from
+#    the fake target forwarder, it can't synthesise or pass through any real
+#    address — proving the .ygg-specific 200::/7 pass-through only happens
+#    when that zone exists.
+# 3. A's original config is restored and reloaded (SIGHUP) so a repeat
 #    `run.sh test` is unaffected.
+#
+# Dns64Zones is reloaded live via SIGHUP (see reloadConfig() in
+# cmd/ydn64/main.go) instead of restarting A's container — this avoids
+# tearing down A's Yggdrasil peering with B entirely, so there's no
+# re-peering wait and none of the podman-restart re-peering flakiness
+# documented in AGENTS.md.
 #
 # This case requires real internet + real Yggdrasil network egress from the
 # A container. If A's environment has no such access, this case will fail —
@@ -68,7 +75,7 @@ cp "$RUN_DIR/ydn64.conf" "$RUN_DIR/ydn64.conf.bak"
 cleanup() { rm -f "$RUN_DIR/ydn64.conf.bak" "$RUN_DIR/ydn64.env.tmp"; }
 trap cleanup EXIT
 
-log "restarting A with the .ygg zone removed..."
+log "reloading A with the .ygg zone removed..."
 ( cd "$ROOT_DIR" && go run ./test/gen \
     -role=ydn64 \
     -listen="tcp://0.0.0.0:${YGG_PORT}" \
@@ -79,16 +86,11 @@ log "restarting A with the .ygg zone removed..."
     -ygg-zone=false \
     -out="$RUN_DIR/ydn64.conf" \
     -envout="$RUN_DIR/ydn64.env.tmp" )
-$PODMAN restart "$CT_A" >/dev/null
-sleep 2
-# 60s: see AGENTS.md / case 04 for the known transient podman-restart
-# re-peering flakiness this budget accounts for.
-wait_for 60 "B re-peered with A (.ygg zone removed)" \
-  sh -c "$PODMAN exec $CT_B yggdrasilctl -json getpeers | grep -q '\"up\": true'"
+reload_a "A reloaded config (.ygg zone removed)"
 
-# As with case 05, B's yggnet peering being back up doesn't guarantee the
-# UDP path to A's DNS64 listener is immediately ready right after a
-# restart, so retry a few times before failing.
+# Even though there's no restart/re-peering to wait for here, the zone
+# change still needs to actually take effect before the next query — same
+# defensive retry as case 05 uses after a restart.
 n=0
 dig_out=""
 while [ "$n" -lt 10 ]; do
@@ -104,9 +106,6 @@ assert_contains "$dig_out" "ANSWER: 0" "no .ygg zone -> no AAAA answer for ${YGG
 
 log "restoring original config with the .ygg zone..."
 cp "$RUN_DIR/ydn64.conf.bak" "$RUN_DIR/ydn64.conf"
-$PODMAN restart "$CT_A" >/dev/null
-sleep 2
-wait_for 60 "B re-peered with restored A" \
-  sh -c "$PODMAN exec $CT_B yggdrasilctl -json getpeers | grep -q '\"up\": true'"
+reload_a "A reloaded config (.ygg zone restored)"
 
 log "PASS: .ygg zone resolves real 200::/7 answers, and returns no AAAA answer when the zone is absent"

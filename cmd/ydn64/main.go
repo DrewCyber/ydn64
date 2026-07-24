@@ -76,6 +76,14 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	// SIGHUP triggers a live config reload (AllowedSources, DNS64
+	// zones/default forwarder/InvalidAddress/cache settings, Nat64UdpTimeout)
+	// without restarting the process — see reloadConfig below for what is
+	// and isn't reloadable this way.
+	reloadCh := make(chan os.Signal, 1)
+	signal.Notify(reloadCh, syscall.SIGHUP)
+	defer signal.Stop(reloadCh)
+
 	if *ver {
 		fmt.Println("ydn64", buildVersion)
 		return
@@ -268,27 +276,42 @@ func main() {
 
 	// ── NAT64 service ─────────────────────────────────────────────────────────
 
+	var nat64Svc *nat64.Service
 	if nat64Cfg.Enable {
-		svc, err := nat64.NewService(nat64Cfg, appCfg.AllowedSources, ns)
+		nat64Svc, err = nat64.NewService(nat64Cfg, appCfg.AllowedSources, ns)
 		if err != nil {
 			logger.Fatalf("failed to create NAT64 service: %v", err)
 		}
-		svc.Start(ctx, logger)
+		nat64Svc.Start(ctx, logger)
 	}
 
 	// ── DNS64 service ─────────────────────────────────────────────────────────
 
+	var dns64Svc *dns64.Service
 	if dns64Cfg.Enable {
-		svc, err := dns64.NewService(dns64Cfg, appCfg.AllowedSources, ns)
+		dns64Svc, err = dns64.NewService(dns64Cfg, appCfg.AllowedSources, ns)
 		if err != nil {
 			logger.Fatalf("failed to create DNS64 service: %v", err)
 		}
-		if err := svc.Start(ctx, logger); err != nil {
+		if err := dns64Svc.Start(ctx, logger); err != nil {
 			logger.Fatalf("failed to start DNS64 service: %v", err)
 		}
 	}
 
-	logger.Println("ydn64 running — press Ctrl+C or send SIGTERM to stop")
+	// ── SIGHUP config reload ──────────────────────────────────────────────────
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-reloadCh:
+				reloadConfig(*useconffile, logger, nat64Svc, nat64Cfg, dns64Svc, dns64Cfg)
+			}
+		}
+	}()
+
+	logger.Println("ydn64 running — press Ctrl+C or send SIGTERM to stop, SIGHUP to reload config")
 	<-ctx.Done()
 	logger.Println("shutting down…")
 
@@ -306,4 +329,68 @@ func main() {
 	}
 	n.core.Stop()
 	logger.Println("stopped")
+}
+
+// reloadConfig re-reads confPath and applies the reloadable subset of
+// AppConfig (AllowedSources; DNS64's Default forwarder, Zones,
+// InvalidAddress, CacheExpiration/CachePurge; NAT64's UdpTimeout) to the
+// already-running services, without restarting the process or touching the
+// Yggdrasil core/netstack.
+//
+// Fields that are NOT reloadable this way — because they'd require
+// recreating the gVisor NIC/routes, rebinding sockets, or reconstructing the
+// Yggdrasil core's identity/peers/listeners — are: PrivateKey, Peers,
+// InterfacePeers, Listen, MulticastInterfaces, NodeInfo(Privacy),
+// AllowedPublicKeys, Nat64Enable, Nat64Pool, Dns64Enable, Dns64Listen. If any
+// of those differ from the running config, a warning is logged and the
+// change is ignored; a full restart is required to apply them.
+func reloadConfig(
+	confPath string,
+	logger *log.Logger,
+	nat64Svc *nat64.Service, runningNat64Cfg config.NAT64Config,
+	dns64Svc *dns64.Service, runningDNS64Cfg config.DNS64Config,
+) {
+	logger.Println("SIGHUP received, reloading config...")
+
+	_, appCfg, err := config.Load(confPath)
+	if err != nil {
+		logger.Warnf("config reload aborted: %v", err)
+		return
+	}
+
+	if allowed := os.Getenv("YDN64_ALLOWED_SOURCES"); allowed != "" {
+		appCfg.AllowedSources = splitEnvList(allowed)
+		if err := appCfg.Validate(); err != nil {
+			logger.Warnf("config reload aborted: YDN64_ALLOWED_SOURCES override invalid: %v", err)
+			return
+		}
+	}
+
+	newNat64Cfg := appCfg.NAT64()
+	newDNS64Cfg := appCfg.DNS64()
+
+	if newNat64Cfg.Enable != runningNat64Cfg.Enable {
+		logger.Warnf("config reload: Nat64Enable change (%v → %v) requires a restart, ignoring", runningNat64Cfg.Enable, newNat64Cfg.Enable)
+	}
+	if newNat64Cfg.Pool6 != runningNat64Cfg.Pool6 {
+		logger.Warnf("config reload: Nat64Pool change (%q → %q) requires a restart, ignoring", runningNat64Cfg.Pool6, newNat64Cfg.Pool6)
+	}
+	if newDNS64Cfg.Enable != runningDNS64Cfg.Enable {
+		logger.Warnf("config reload: Dns64Enable change (%v → %v) requires a restart, ignoring", runningDNS64Cfg.Enable, newDNS64Cfg.Enable)
+	}
+	if newDNS64Cfg.Listen != runningDNS64Cfg.Listen {
+		logger.Warnf("config reload: Dns64Listen change (%q → %q) requires a restart, ignoring", runningDNS64Cfg.Listen, newDNS64Cfg.Listen)
+	}
+
+	if nat64Svc != nil {
+		nat64Svc.Reload(newNat64Cfg, appCfg.AllowedSources)
+	}
+	if dns64Svc != nil {
+		if err := dns64Svc.Reload(newDNS64Cfg, appCfg.AllowedSources); err != nil {
+			logger.Warnf("DNS64 config reload failed: %v", err)
+			return
+		}
+	}
+
+	logger.Printf("config reloaded  sources=%v", appCfg.AllowedSources)
 }

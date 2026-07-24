@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gologme/log"
@@ -28,7 +29,7 @@ const dnsTCPIdleTimeout = 10 * time.Second
 type Service struct {
 	proxy       *proxy
 	listenAddr  string
-	allowedNets []*net.IPNet
+	allowedNets atomic.Pointer[[]*net.IPNet]
 	ns          *netstack.YggdrasilNetstack
 }
 
@@ -39,39 +40,45 @@ func NewService(cfg config.DNS64Config, allowedSources []string, ns *netstack.Yg
 		return nil, fmt.Errorf("dns64: %w", err)
 	}
 
-	zones := buildZones(cfg.Zones)
-
 	expDur := time.Duration(cfg.CacheExp) * time.Second
 	purgeDur := time.Duration(cfg.CachePurge) * time.Second
 
 	p := &proxy{
-		cache:          newCache(expDur, purgeDur),
-		zones:          zones,
-		defaultForward: cfg.Default,
-		ia:             ia,
-		ns:             ns,
+		cache: newCache(expDur, purgeDur),
+		ns:    ns,
 	}
+	p.reload(cfg.Default, ia, buildZones(cfg.Zones))
 
-	var allowed []*net.IPNet
-	for _, src := range allowedSources {
-		if ip := net.ParseIP(src); ip != nil {
-			allowed = append(allowed, &net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)})
-		} else if _, cidr, err := net.ParseCIDR(src); err == nil {
-			allowed = append(allowed, cidr)
-		}
+	allowed := config.ParseAllowedNets(allowedSources)
+	s := &Service{
+		proxy:      p,
+		listenAddr: cfg.Listen,
+		ns:         ns,
 	}
+	s.allowedNets.Store(&allowed)
+	return s, nil
+}
 
-	return &Service{
-		proxy:       p,
-		listenAddr:  cfg.Listen,
-		allowedNets: allowed,
-		ns:          ns,
-	}, nil
+// Reload atomically replaces AllowedSources, the DNS64 zone table/default
+// forwarder/InvalidAddress policy, and the cache's expiration/purge
+// intervals, e.g. in response to a SIGHUP-triggered config reload. Safe to
+// call concurrently with in-flight queries. Dns64Listen and Dns64Enable are
+// not reloadable and require a process restart to change.
+func (s *Service) Reload(cfg config.DNS64Config, allowedSources []string) error {
+	ia, err := parseIA(cfg.InvalidAddress)
+	if err != nil {
+		return fmt.Errorf("dns64: %w", err)
+	}
+	allowed := config.ParseAllowedNets(allowedSources)
+	s.allowedNets.Store(&allowed)
+	s.proxy.reload(cfg.Default, ia, buildZones(cfg.Zones))
+	s.proxy.cache.Reload(time.Duration(cfg.CacheExp)*time.Second, time.Duration(cfg.CachePurge)*time.Second)
+	return nil
 }
 
 // isAllowed reports whether srcIP is in one of the configured allowed-source ranges.
 func (s *Service) isAllowed(ip net.IP) bool {
-	for _, n := range s.allowedNets {
+	for _, n := range *s.allowedNets.Load() {
 		if n.Contains(ip) {
 			return true
 		}
@@ -129,7 +136,7 @@ func (s *Service) Start(ctx context.Context, logger *log.Logger) error {
 		return fmt.Errorf("dns64: binding TCP on %s: %w", s.listenAddr, err)
 	}
 
-	logger.Printf("DNS64 started  listen=%s (udp+tcp)  sources=%v", s.listenAddr, s.allowedNets)
+	logger.Printf("DNS64 started  listen=%s (udp+tcp)  sources=%v", s.listenAddr, *s.allowedNets.Load())
 
 	go func() {
 		<-ctx.Done()
@@ -195,7 +202,7 @@ func (s *Service) serveUDP(conn *gonet.UDPConn, logger *log.Logger) {
 			resp := s.proxy.handle(req)
 			out, err := resp.Pack()
 			if err != nil {
-				logger.Debugf("DNS64: pack error for %s: %v", req.Question, err)
+				logger.Debugf("DNS64: pack error for %v: %v", req.Question, err)
 				return
 			}
 			if _, err := conn.WriteTo(out, from); err != nil {

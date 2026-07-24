@@ -63,6 +63,25 @@ wait_for() {
 exec_b() { $PODMAN exec "$CT_B" "$@"; }
 exec_a_logs() { $PODMAN logs "$CT_A" "$@"; }
 
+# reload_a <description>
+# Sends SIGHUP to the running A (ydn64) container to trigger a live config
+# reload (AllowedSources; DNS64 zones/default forwarder/InvalidAddress/cache
+# settings; Nat64UdpTimeout — see reloadConfig() in cmd/ydn64/main.go) and
+# waits for the resulting "config reloaded" line to appear in A's log.
+#
+# Assumes $RUN_DIR/ydn64.conf has already been rewritten with the desired
+# change. Unlike the old `podman restart` approach this never tears down
+# A's process or its Yggdrasil peering with B, so there is no re-peering
+# wait and none of the podman-restart re-peering flakiness documented in
+# AGENTS.md — the reload is applied in place, in well under a second.
+reload_a() {
+  desc=$1
+  before=$(wc -l <"$RUN_DIR/ydn64.log" 2>/dev/null || echo 0)
+  $PODMAN kill --signal HUP "$CT_A" >/dev/null
+  wait_for 10 "$desc" \
+    sh -c "tail -n +\$(($before + 1)) '$RUN_DIR/ydn64.log' 2>/dev/null | grep -q 'config reloaded'"
+}
+
 assert_contains() {
   haystack=$1; needle=$2; desc=$3
   case "$haystack" in
