@@ -12,6 +12,8 @@ moved under the corresponding version heading.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-24
+
 - Removed `AdminListen`, `IfName`, and `IfMTU` from the `-genconf` template
   and the sample `ydn64.conf`. All three are dead in this app: `AdminListen`
   and `IfName` are always force-overridden to `"none"` (no admin socket, no
