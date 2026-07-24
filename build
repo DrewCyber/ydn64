@@ -3,8 +3,11 @@ set -e
 
 PKG="github.com/DrewCyber/ydn64/cmd/ydn64"
 VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "unknown")
-LDFLAGS="-X main.buildVersion=${VERSION}"
+# -s -w strip the symbol table/DWARF debug info, -trimpath removes local
+# filesystem paths from the binary; together they shrink the binary
+# noticeably and don't affect runtime behavior (only stack traces/debugging).
+LDFLAGS="-s -w -X main.buildVersion=${VERSION}"
 
 echo "Building ydn64 ${VERSION}..."
-go build -ldflags "${LDFLAGS}" -o ydn64 "${PKG}"
+go build -trimpath -ldflags "${LDFLAGS}" -o ydn64 "${PKG}"
 echo "Done: $(pwd)/ydn64"

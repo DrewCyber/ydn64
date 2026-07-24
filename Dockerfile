@@ -18,7 +18,7 @@ RUN go mod download
 COPY cmd ./cmd
 COPY src ./src
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -ldflags "-X main.buildVersion=${VERSION}" -o /out/ydn64 ./cmd/ydn64
+    go build -trimpath -ldflags "-s -w -X main.buildVersion=${VERSION}" -o /out/ydn64 ./cmd/ydn64
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
