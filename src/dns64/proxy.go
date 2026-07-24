@@ -7,6 +7,11 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
+
+	"github.com/DrewCyber/ydn64/src/netstack"
 )
 
 // proxy implements the DNS64 translation logic.
@@ -15,12 +20,65 @@ type proxy struct {
 	zones          []zone
 	defaultForward string
 	ia             InvalidAddress
+	ns             *netstack.YggdrasilNetstack // used to dial Yggdrasil-native (200::/7) forwarders
 }
 
-// lookup performs a plain UDP DNS query and returns the response.
-func lookup(server string, req *dns.Msg) (*dns.Msg, error) {
+// yggdrasilRange is the Yggdrasil node address space (200::/7). Forwarders
+// whose address falls in this range are only reachable through the
+// embedded gVisor netstack (they're not real host-routable addresses), so
+// lookups to them must be dialled via the Yggdrasil NIC instead of the
+// host OS network stack.
+var yggdrasilRange = func() *net.IPNet {
+	_, n, err := net.ParseCIDR("0200::/7")
+	if err != nil {
+		panic(err)
+	}
+	return n
+}()
+
+// lookup performs a UDP DNS query and returns the response. Forwarders in
+// the Yggdrasil address range (200::/7) are dialled through the embedded
+// gVisor netstack; everything else uses the host OS network stack.
+func (p *proxy) lookup(server string, req *dns.Msg) (*dns.Msg, error) {
+	host, _, err := net.SplitHostPort(server)
+	if err == nil {
+		if ip := net.ParseIP(host); ip != nil && p.ns != nil && yggdrasilRange.Contains(ip) {
+			return p.lookupViaNetstack(server, ip, req)
+		}
+	}
+
 	c := &dns.Client{Net: "udp", Timeout: 5 * time.Second}
 	resp, _, err := c.Exchange(req, server)
+	return resp, err
+}
+
+// lookupViaNetstack dials the forwarder through the embedded gVisor stack
+// (the same one connected to the Yggdrasil Core), since Yggdrasil-native
+// addresses aren't reachable via the host OS network stack.
+func (p *proxy) lookupViaNetstack(server string, ip net.IP, req *dns.Msg) (*dns.Msg, error) {
+	_, portStr, err := net.SplitHostPort(server)
+	if err != nil {
+		return nil, err
+	}
+	var port int
+	if _, err := fmt.Sscan(portStr, &port); err != nil {
+		return nil, fmt.Errorf("forwarder port %q: %w", portStr, err)
+	}
+
+	raddr := &tcpip.FullAddress{
+		NIC:  1,
+		Addr: tcpip.AddrFromSlice(ip.To16()),
+		Port: uint16(port),
+	}
+	conn, tcpErr := gonet.DialUDP(p.ns.Stack(), nil, raddr, ipv6.ProtocolNumber)
+	if tcpErr != nil {
+		return nil, fmt.Errorf("dialling %s via yggdrasil netstack: %w", server, tcpErr)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	c := &dns.Client{Net: "udp"}
+	resp, _, err := c.ExchangeWithConn(req, &dns.Conn{Conn: conn})
 	return resp, err
 }
 
@@ -76,8 +134,7 @@ func (p *proxy) handle(req *dns.Msg) *dns.Msg {
 
 // handleAAAA implements DNS64 AAAA synthesis:
 //  1. Check cache.
-//  2. Query upstream for AAAA — pass through yggdrasil addresses (200::/7)
-//     unchanged; pass through real AAAA if zone.returnPublicIPv6.
+//  2. Query upstream for AAAA — pass through real AAAA if zone.returnIPv6Addresses.
 //  3. If no usable AAAA, query A and synthesise from prefix (if configured).
 func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string) (*dns.Msg, error) {
 	// Cache hit?
@@ -94,7 +151,7 @@ func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string
 	upReq := new(dns.Msg)
 	req.CopyTo(upReq)
 	upReq.Question = []dns.Question{*q}
-	upResp, err := lookup(server, upReq)
+	upResp, err := p.lookup(server, upReq)
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +182,7 @@ func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string
 	aReq := new(dns.Msg)
 	req.CopyTo(aReq)
 	aReq.Question = []dns.Question{{Name: q.Name, Qtype: dns.TypeA, Qclass: q.Qclass}}
-	aResp, err := lookup(server, aReq)
+	aResp, err := p.lookup(server, aReq)
 	if err != nil {
 		return nil, err
 	}
@@ -144,10 +201,11 @@ func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string
 }
 
 // filterAAAA selects AAAA records from rrs according to zone rules:
-//   - Yggdrasil addresses (200::/7) always pass through.
 //   - Unspecified (::) is handled by InvalidAddress policy.
-//   - Real public AAAA passes through only if zone.returnPublicIPv6.
-//   - Mutually exclusive: zone.prefix and zone.returnPublicIPv6 are
+//   - AAAA passes through only if zone.returnIPv6Addresses (this covers
+//     Yggdrasil-native 200::/7 addresses too — there is no special-casing
+//     for that range, it's just another IPv6 answer gated by the flag).
+//   - Mutually exclusive: zone.prefix and zone.returnIPv6Addresses are
 //     validated at config load time.
 func (p *proxy) filterAAAA(rrs []dns.RR, z *zone) []dns.RR {
 	out := make([]dns.RR, 0, len(rrs))
@@ -158,12 +216,6 @@ func (p *proxy) filterAAAA(rrs []dns.RR, z *zone) []dns.RR {
 			continue
 		}
 		ip := a.AAAA
-
-		// Yggdrasil address — always pass through.
-		if yggNet.Contains(ip) {
-			out = append(out, rr)
-			continue
-		}
 
 		if ip.IsUnspecified() {
 			switch p.ia {
@@ -177,8 +229,7 @@ func (p *proxy) filterAAAA(rrs []dns.RR, z *zone) []dns.RR {
 			continue
 		}
 
-		// Real public AAAA.
-		if z.returnPublicIPv6 {
+		if z.returnIPv6Addresses {
 			out = append(out, rr)
 		}
 		// If zone has a prefix instead, this AAAA is skipped here;
@@ -221,16 +272,16 @@ func (p *proxy) synthesiseFromA(rrs []dns.RR, name string, z *zone) []dns.RR {
 	return out
 }
 
-// handleA returns A records only if zone.returnPublicIPv4 is set.
+// handleA returns A records only if zone.returnIPv4Addresses is set.
 func (p *proxy) handleA(req *dns.Msg, q *dns.Question, z *zone, server string) (*dns.Msg, error) {
 	upReq := new(dns.Msg)
 	req.CopyTo(upReq)
 	upReq.Question = []dns.Question{*q}
-	resp, err := lookup(server, upReq)
+	resp, err := p.lookup(server, upReq)
 	if err != nil {
 		return nil, err
 	}
-	if !z.returnPublicIPv4 {
+	if !z.returnIPv4Addresses {
 		resp.Answer = []dns.RR{}
 	}
 	return resp, nil
@@ -252,7 +303,7 @@ func (p *proxy) handlePTR(req *dns.Msg, q *dns.Question, z *zone, server string)
 		req.CopyTo(upReq)
 		origQuestion := upReq.Question
 		upReq.Question = []dns.Question{{Name: realPTR, Qtype: dns.TypePTR, Qclass: q.Qclass}}
-		resp, err := lookup(server, upReq)
+		resp, err := p.lookup(server, upReq)
 		if err != nil {
 			return nil, err
 		}
@@ -346,5 +397,5 @@ func nibbleVal(c byte) int {
 func (p *proxy) passThrough(req *dns.Msg, server string) (*dns.Msg, error) {
 	upReq := new(dns.Msg)
 	req.CopyTo(upReq)
-	return lookup(server, upReq)
+	return p.lookup(server, upReq)
 }

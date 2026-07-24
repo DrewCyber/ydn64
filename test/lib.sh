@@ -34,6 +34,12 @@ CT_TARGET=ydn64-test-target
 
 YGG_PORT=9993
 
+# Real outbound peer connecting A to the actual Yggdrasil network (over its
+# targetnet/internet egress), needed for test/cases/06_ygg_zone_resolution.sh
+# to reach a real Alfis DNS forwarder at [308:84:68:55::]:53. Same address
+# used as the sample peer in the checked-in ydn64.conf.
+YDN64_REAL_PEER=${YDN64_REAL_PEER:-tcp://37.186.113.100:1514}
+
 log()  { printf '\033[1;34m[test]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[test]\033[0m %s\n' "$*" >&2; }
 fail() { printf '\033[1;31m[test]\033[0m %s\n' "$*" >&2; exit 1; }

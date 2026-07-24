@@ -13,11 +13,11 @@ import (
 
 // ZoneConfig defines DNS64 behaviour for a matched domain group.
 type ZoneConfig struct {
-	Domains          []string `json:"domains"`
-	Forwarder        string   `json:"forwarder,omitempty"`
-	Prefix           string   `json:"prefix,omitempty"`
-	ReturnPublicIPv4 bool     `json:"return-public-ipv4,omitempty"`
-	ReturnPublicIPv6 bool     `json:"return-public-ipv6,omitempty"`
+	Domains             []string `json:"domains"`
+	Forwarder           string   `json:"forwarder,omitempty"`
+	Prefix              string   `json:"prefix,omitempty"`
+	ReturnIPv4Addresses bool     `json:"return-ipv4-addresses,omitempty"`
+	ReturnIPv6Addresses bool     `json:"return-ipv6-addresses,omitempty"`
 }
 
 // DNS64Config holds configuration for the embedded DNS64 service.
@@ -70,9 +70,9 @@ func (c *AppConfig) ApplyPrivateKeyOverride(nodeIP, pool6CIDR, pool6Prefix strin
 	c.Dns64Listen = fmt.Sprintf("[%s]:53", nodeIP)
 	c.Dns64Zones = []ZoneConfig{
 		{
-			Domains:          []string{"."},
-			ReturnPublicIPv4: false,
-			Prefix:           pool6Prefix,
+			Domains:             []string{"."},
+			ReturnIPv4Addresses: false,
+			Prefix:              pool6Prefix,
 		},
 	}
 }
@@ -157,8 +157,8 @@ func (c *AppConfig) Validate() error {
 			return fmt.Errorf(`Dns64InvalidAddress must be "ignore", "process", or "discard", got %q`, c.Dns64InvalidAddress)
 		}
 		for i, zone := range c.Dns64Zones {
-			if zone.Prefix != "" && zone.ReturnPublicIPv6 {
-				return fmt.Errorf("Dns64Zones[%d]: \"prefix\" and \"return-public-ipv6: true\" are mutually exclusive", i)
+			if zone.Prefix != "" && zone.ReturnIPv6Addresses {
+				return fmt.Errorf("Dns64Zones[%d]: \"prefix\" and \"return-ipv6-addresses: true\" are mutually exclusive", i)
 			}
 			if len(zone.Domains) == 0 {
 				return fmt.Errorf("Dns64Zones[%d]: \"domains\" list is required", i)

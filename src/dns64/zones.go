@@ -36,19 +36,11 @@ func parseIA(s string) (InvalidAddress, error) {
 
 // zone is the resolved, ready-to-use form of config.ZoneConfig.
 type zone struct {
-	domains          []string // already lower-cased
-	forwarder        string   // empty → use default
-	prefix           net.IP   // nil → no NAT64 synthesis
-	returnPublicIPv4 bool
-	returnPublicIPv6 bool
-}
-
-// yggNet is the 200::/7 Yggdrasil address range used to detect native
-// yggdrasil AAAA responses that should be passed through unchanged.
-var yggNet *net.IPNet
-
-func init() {
-	_, yggNet, _ = net.ParseCIDR("200::/7")
+	domains             []string // already lower-cased
+	forwarder           string   // empty → use default
+	prefix              net.IP   // nil → no NAT64 synthesis
+	returnIPv4Addresses bool
+	returnIPv6Addresses bool
 }
 
 // buildZones converts the config zone slice into a slice of resolved zone
@@ -62,14 +54,21 @@ func buildZones(cfgZones []config.ZoneConfig) []zone {
 		}
 		domains := make([]string, len(z.Domains))
 		for j, d := range z.Domains {
-			domains[j] = strings.ToLower(d)
+			dl := strings.ToLower(d)
+			// Normalise an optional leading dot (e.g. ".ygg" == "ygg") so
+			// matchZone's suffix check ("."+dl) doesn't end up comparing
+			// against a double dot that can never match.
+			if dl != "." {
+				dl = strings.TrimPrefix(dl, ".")
+			}
+			domains[j] = dl
 		}
 		out = append(out, zone{
-			domains:          domains,
-			forwarder:        z.Forwarder,
-			prefix:           prefix,
-			returnPublicIPv4: z.ReturnPublicIPv4,
-			returnPublicIPv6: z.ReturnPublicIPv6,
+			domains:             domains,
+			forwarder:           z.Forwarder,
+			prefix:              prefix,
+			returnIPv4Addresses: z.ReturnIPv4Addresses,
+			returnIPv6Addresses: z.ReturnIPv6Addresses,
 		})
 	}
 	return out

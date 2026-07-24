@@ -4,15 +4,9 @@ If we have "200::/7" as AAAA dns response, we just return it as a response witho
 Additional for the main yggdrasil config sections below:
 
 ```
-[nat64]                             # create separate section for nat64
-enable = true                       # enable / disable nat64 service
-pool6 = "301:363a:9499:c858::/96"   # subnet for nat64 pool. Gathered from current node ip address.
-allowed_nat64_sources = []
-
 [dns64]                             # separate section for dns64
-enable = false                      # false by default
-listen: "[200:c771:1561:ed81::1]:53"    # The address and port to bind to. By default yggdrasil node ip here, but could be changed to 300 subnet address.
-allowed_dns64_sources = []
+enable = true                       # true by default
+listen: "[200:c771:1561:ed81::1]:53"    # The address and port to bind to. By default yggdrasil node ip here
 default: 8.8.8.8:53                 # (mandatory) default forwarder for the requests
 cache_expiration: 300               # expire dns cache in 300 sec
 cache_purge: 600                    # purge dns cache in 600 sec

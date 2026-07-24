@@ -12,6 +12,26 @@ moved under the corresponding version heading.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-24
+
+- **Removed the 200::/7 special-case** in DNS64: zones no longer get
+  implicit Yggdrasil-native AAAA pass-through behavior based on the
+  forwarder/answer address falling in `200::/7`. A zone must now opt in
+  explicitly via `return-ipv6-addresses: true` to pass through real AAAA
+  answers, regardless of whether they happen to be Yggdrasil addresses.
+- **Renamed config keys** (clean break, no aliases): `ReturnPublicIPv4` /
+  `ReturnPublicIPv6` (`return-public-ipv4` / `return-public-ipv6`) →
+  `ReturnIPv4Addresses` / `ReturnIPv6Addresses` (`return-ipv4-addresses` /
+  `return-ipv6-addresses`). Existing config files using the old keys must be
+  updated by hand; the old keys are silently ignored otherwise.
+- The `.ygg` zone block in [ydn64.conf](ydn64.conf) now reads
+  `return-ipv6-addresses: true` with an updated comment (no longer claims
+  special 200::/7 handling — it passes through AAAA answers because it's
+  explicitly configured to, like any other zone).
+- `-genconf` now generates the `.ygg` zone as an active (uncommented) entry
+  in `Dns64Zones` by default, instead of a commented-out example — new
+  nodes resolve `.ygg` names out of the box.
+
 ## [0.1.0] - 2026-07-24
 
 - Removed `AdminListen`, `IfName`, and `IfMTU` from the `-genconf` template

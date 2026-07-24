@@ -1,0 +1,19 @@
+NAT64 is defined across several RFCs, each covering a different piece of the framework. Here's the core set:
+
+Foundational architecture
+
+RFC 6144 – Framework for IPv4/IPv6 Translation (the overview document describing where NAT64 fits among other translation mechanisms)
+RFC 6145 – IP/ICMP Translation Algorithm (the actual packet header translation rules, successor to RFC 2765/NAT-PT era docs)
+RFC 6146 – Stateful NAT64: Network Address and Protocol Translation from IPv6 Clients to IPv4 Servers (the core NAT64 spec — this is the main one)
+RFC 6052 – IPv6 Addressing of IPv4/IPv6 Translators (defines the well-known prefix 64:ff9b::/96 and address format used to embed IPv4 addresses in IPv6)
+
+Supporting/related pieces
+
+RFC 6147 – DNS64: DNS Extensions for Network Address Translation from IPv6 Clients to IPv4 Servers (almost always deployed alongside NAT64)
+RFC 6219 – The China Education and Research Network (CERNET2) Statefull IVI Translation Design (an alternative/variant approach, less commonly required)
+RFC 7050 – Discovery of the IPv6 Prefix Used for IPv6 Address Synthesis (lets hosts discover the NAT64 prefix, e.g. for happy eyeballs / 464XLAT scenarios)
+RFC 7269 – NAT64 Deployment Options and Experience (operational guidance, not a protocol spec but useful for deployment planning)
+RFC 7757 / RFC 7915 – updates and clarifications to the IP/ICMP translation algorithm (RFC 7915 obsoletes RFC 6145)
+
+
+For a typical stateful NAT64+DNS64 deployment, the ones you actually need to implement against are RFC 6052, RFC 6146, RFC 7915 (updates 6145), and RFC 6147. The rest are either historical context, operational guidance, or apply only if you're doing stateless variants.

@@ -45,11 +45,13 @@ log "restoring original AllowedSources config..."
 cp "$RUN_DIR/ydn64.conf.bak" "$RUN_DIR/ydn64.conf"
 $PODMAN restart "$CT_A" >/dev/null
 sleep 2
-# 30s: yggdrasil-go's peer reconnect backoff, combined with the two rapid
-# restarts this case performs, means re-peering time is variable — a 15s
-# budget was observed to occasionally time out even though B eventually
-# reconnects a few seconds later.
-wait_for 30 "B re-peered with restored A" \
+# 60s: yggdrasil-go's peer reconnect backoff, combined with the two rapid
+# restarts this case performs, means re-peering time is variable — shorter
+# budgets (15s, then 30s) were both observed to occasionally time out even
+# though B eventually reconnects a bit later (transient podman bridge-
+# networking hiccup on the macOS podman-machine VM after a restart, see
+# AGENTS.md).
+wait_for 60 "B re-peered with restored A" \
   sh -c "$PODMAN exec $CT_B yggdrasilctl -json getpeers | grep -q '\"up\": true'"
 
 log "PASS: AllowedSources correctly blocked a non-matching source (DNS64 + NAT64 TCP + NAT64 ICMP)"

@@ -22,6 +22,25 @@ import (
 	ygconfig "github.com/yggdrasil-network/yggdrasil-go/src/config"
 )
 
+// existingPrivateKey reads the "PrivateKey" field out of a previously
+// generated config at path, if any. This lets repeated -out regenerations
+// to the same file (e.g. a test case restarting a container with one
+// tweaked setting) preserve node identity/address instead of picking a new
+// random key every time.
+func existingPrivateKey(path string) ygconfig.KeyBytes {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var existing struct {
+		PrivateKey ygconfig.KeyBytes
+	}
+	if err := json.Unmarshal(data, &existing); err != nil {
+		return nil
+	}
+	return existing.PrivateKey
+}
+
 func splitCSV(s string) []string {
 	if strings.TrimSpace(s) == "" {
 		return []string{}
@@ -46,6 +65,7 @@ func main() {
 	dns64Invalid := flag.String("dns64-invalid", "ignore", "Dns64InvalidAddress (role=ydn64 only)")
 	nat64Enable := flag.Bool("nat64-enable", true, "Nat64Enable (role=ydn64 only)")
 	dns64Enable := flag.Bool("dns64-enable", true, "Dns64Enable (role=ydn64 only)")
+	yggZone := flag.Bool("ygg-zone", true, "include the .ygg Dns64Zones entry (role=ydn64 only)")
 	out := flag.String("out", "", "output config file path (required)")
 	envout := flag.String("envout", "", "output KEY=VALUE env file path (required)")
 	flag.Parse()
@@ -60,6 +80,9 @@ func main() {
 	}
 
 	ygCfg := ygconfig.GenerateConfig()
+	if key := existingPrivateKey(*out); key != nil {
+		ygCfg.PrivateKey = key
+	}
 	ygCfg.Peers = splitCSV(*peers)
 	ygCfg.Listen = splitCSV(*listen)
 	// Disable multicast discovery: the test harness uses static peering only,
@@ -114,7 +137,7 @@ func main() {
 		merged["Dns64CacheExpiration"] = 300
 		merged["Dns64CachePurge"] = 600
 		merged["Dns64InvalidAddress"] = *dns64Invalid
-		merged["Dns64Zones"] = []map[string]interface{}{
+		zones := []map[string]interface{}{
 			// Real-world escape hatch used only by
 			// test/cases/05_real_world_icmp.sh: dns.google is forwarded to
 			// Google's real public resolver instead of the hermetic fake
@@ -128,11 +151,24 @@ func main() {
 				"prefix":    pool6Prefix,
 			},
 			{
-				"domains":            []string{"."},
-				"return-public-ipv4": false,
-				"prefix":             pool6Prefix,
+				"domains":               []string{"."},
+				"return-ipv4-addresses": false,
+				"prefix":                pool6Prefix,
 			},
 		}
+		if *yggZone {
+			// Real-world escape hatch used only by
+			// test/cases/06_ygg_zone_resolution.sh: forwards .ygg queries to
+			// a real Alfis DNS server over the actual Yggdrasil network (see
+			// -peers), so that case can validate zone forwarding and
+			// return-ipv6-addresses against a genuine 200::/7 answer.
+			zones = append(zones, map[string]interface{}{
+				"domains":               []string{".ygg"},
+				"forwarder":             "[308:84:68:55::]:53",
+				"return-ipv6-addresses": true,
+			})
+		}
+		merged["Dns64Zones"] = zones
 
 		envLines = append(envLines,
 			fmt.Sprintf("DNS64_LISTEN=%s", dns64Listen),

@@ -43,6 +43,7 @@ func NewService(cfg config.DNS64Config, allowedSources []string, ns *netstack.Yg
 		zones:          zones,
 		defaultForward: cfg.Default,
 		ia:             ia,
+		ns:             ns,
 	}
 
 	var allowed []*net.IPNet

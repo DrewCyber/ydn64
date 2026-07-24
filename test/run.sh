@@ -65,6 +65,7 @@ genconfs() {
   ( cd "$ROOT_DIR" && go run ./test/gen \
       -role=ydn64 \
       -listen="tcp://0.0.0.0:${YGG_PORT}" \
+      -peers="$YDN64_REAL_PEER" \
       -allowed-sources="${YDN64_ALLOWED_SOURCES:-200::/7}" \
       -dns64-default="${IP_TARGET}:53" \
       -dns64-invalid="${YDN64_DNS64_INVALID:-ignore}" \
