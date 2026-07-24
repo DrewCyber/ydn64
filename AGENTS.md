@@ -106,7 +106,9 @@ context/                design notes — see caveat below
 tmp/                    git-ignored scratch space for local test runs
 Dockerfile              production multi-arch image (not test/Containerfile.ydn64, which is test-harness-only)
 docker-entrypoint.sh    generates ydn64.conf on first run if $YDN64_CONFIG is missing
-.github/workflows/      docker-publish.yml: builds + pushes ghcr.io images on vX.Y.Z tags
+.github/workflows/      release.yml: on vX.Y.Z tags, builds + pushes multi-arch ghcr.io
+                        images AND builds Linux/Windows/macOS binaries (amd64/arm64,
+                        plus linux/arm and linux/386) published to a GitHub Release
 ```
 
 ### Container env var overrides

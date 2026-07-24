@@ -1,0 +1,4 @@
+ - [ ] Config cleanup
+ - [ ] CGO_ENABLED
+ - [ ] DNS params tests
+ - [ ] Alfis dns zone

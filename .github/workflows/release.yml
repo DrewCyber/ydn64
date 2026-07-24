@@ -1,0 +1,151 @@
+name: Release
+
+# Triggered by pushing a version tag, e.g. `v1.4.2`. The `+` quantifiers
+# match one-or-more digits, so multi-digit versions like `v10.11.123` match
+# too (see the "Filter pattern cheat sheet" in GitHub's workflow syntax docs).
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{raw}}
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  binaries:
+    name: Build binary (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: linux
+            goarch: arm
+            goarm: "7"
+          - goos: linux
+            goarch: "386"
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Compute asset name
+        id: vars
+        run: |
+          if [ "${{ matrix.goarch }}" = "arm" ]; then
+            arch="armv${{ matrix.goarm }}"
+          else
+            arch="${{ matrix.goarch }}"
+          fi
+          echo "name=ydn64-${{ matrix.goos }}-${arch}" >> "$GITHUB_OUTPUT"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            echo "binary=ydn64.exe" >> "$GITHUB_OUTPUT"
+            echo "archive_ext=zip" >> "$GITHUB_OUTPUT"
+          else
+            echo "binary=ydn64" >> "$GITHUB_OUTPUT"
+            echo "archive_ext=tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          go build -ldflags "-X main.buildVersion=${{ github.ref_name }}" -o dist/${{ steps.vars.outputs.binary }} ./cmd/ydn64
+
+      - name: Package
+        run: |
+          cd dist
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip ${{ steps.vars.outputs.name }}.zip ${{ steps.vars.outputs.binary }}
+          else
+            tar -czf ${{ steps.vars.outputs.name }}.tar.gz ${{ steps.vars.outputs.binary }}
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.vars.outputs.name }}
+          path: dist/${{ steps.vars.outputs.name }}.${{ steps.vars.outputs.archive_ext }}
+          retention-days: 1
+
+  release:
+    name: Publish GitHub Release
+    needs: binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create/update release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+

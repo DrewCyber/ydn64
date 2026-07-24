@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 
-# Multi-arch production image for ydn64. Built by .github/workflows/docker-publish.yml
+# Multi-arch production image for ydn64. Built by the "docker" job in
+# .github/workflows/release.yml (which also builds Linux binaries).
 # for linux/amd64 and linux/arm64, published to ghcr.io on version tags.
 #
 # Cross-compiles natively (no QEMU emulation of the Go toolchain itself):

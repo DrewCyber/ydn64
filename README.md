@@ -43,7 +43,11 @@ Everything else is configured with secure, working defaults out of the box.
 
 Multi-arch (`linux/amd64`, `linux/arm64`) images are published to
 `ghcr.io/drewcyber/ydn64` on every version tag (`vX.Y.Z`), plus a rolling
-`latest` tag. See [.github/workflows/docker-publish.yml](.github/workflows/docker-publish.yml).
+`latest` tag. The same workflow also cross-compiles standalone binaries for
+Linux (`amd64`, `arm64`, `arm` (armv7), `386`), Windows (`amd64`, `arm64`),
+and macOS (`amd64`, `arm64`), archived (`.tar.gz` for Linux/macOS, `.zip`
+for Windows) and attached to the GitHub Release for that tag. See
+[.github/workflows/release.yml](.github/workflows/release.yml).
 
 The image's entrypoint ([docker-entrypoint.sh](docker-entrypoint.sh)) will
 generate a fresh config with `ydn64 -genconf` on first run if none exists at
