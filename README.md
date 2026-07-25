@@ -156,6 +156,97 @@ working today. A planned improvement is to fall back to `"udp4"` when the
 raw socket fails to open, to support unprivileged environments where
 `ping_group_range` is configured but `CAP_NET_RAW` isn't granted.
 
+## Standards conformance and deliberate deviations
+
+**`ydn64`'s design goal is to work well for Yggdrasil clients — not to be a
+strictly conformant NAT64/DNS64 implementation.** Where the two conflict,
+`ydn64` chooses the behaviour that works for a client whose *only*
+connectivity is Yggdrasil (no global IPv6 route, no IPv4 at all).
+
+This section documents where `ydn64` knowingly departs from the relevant
+RFCs, so the behaviour isn't mistaken for a bug.
+
+### Relevant RFCs
+
+| RFC | Title |
+|---|---|
+| [6146](https://www.rfc-editor.org/rfc/rfc6146) | Stateful NAT64 |
+| [6147](https://www.rfc-editor.org/rfc/rfc6147) | DNS64 |
+| [6052](https://www.rfc-editor.org/rfc/rfc6052) | IPv6 Addressing of IPv4/IPv6 Translators |
+| [7915](https://www.rfc-editor.org/rfc/rfc7915) | IP/ICMP Translation Algorithm (obsoletes 6145) |
+| [4787](https://www.rfc-editor.org/rfc/rfc4787) / [5382](https://www.rfc-editor.org/rfc/rfc5382) / [5508](https://www.rfc-editor.org/rfc/rfc5508) | NAT behavioural requirements for UDP / TCP / ICMP |
+| [7050](https://www.rfc-editor.org/rfc/rfc7050) / [8880](https://www.rfc-editor.org/rfc/rfc8880) | NAT64 prefix discovery via `ipv4only.arpa` |
+| [8781](https://www.rfc-editor.org/rfc/rfc8781) | Discovering PREF64 in Router Advertisements |
+
+The full list — including the DNS protocol RFCs pulled in by RFC 6147 §5.4,
+and a per-requirement implementation status — is kept in
+[context/RFCs.txt](context/RFCs.txt).
+
+### Deliberate DNS64 deviations
+
+**1. AAAA records are synthesised even when real AAAA records exist.**
+RFC 6147 §5.1.1 says a DNS64 *"MUST NOT synthesize AAAA RRs when real AAAA
+RRs exist"* by default. `ydn64`'s default catch-all zone does the opposite,
+because a real `2000::/3` address is **unreachable** for a client whose only
+transport is Yggdrasil — returning it would just make connections hang.
+RFC 6147 **Appendix A** explicitly anticipates this as an administrator
+choice; `ydn64` simply makes it the default. Set
+`return-ipv6-addresses: true` on a zone to get the conformant behaviour
+(this is what the `.ygg` zone does — those addresses *are* reachable).
+
+**2. A records are suppressed for zones with `return-ipv4-addresses: false`.**
+RFC 6147 §5.3.3 says *"All other RRs MUST be returned unchanged. This
+includes responses to queries for A RRs."* An IPv4 address is useless to an
+IPv6-only Yggdrasil client, and returning it invites the client to attempt a
+connection that cannot succeed. Set `return-ipv4-addresses: true` per zone to
+pass A records through.
+
+**3. `ANY` queries are answered from the AAAA synthesis path.**
+RFC 8482 recommends answering `ANY` minimally (e.g. a single `HINFO`).
+`ydn64` instead rewrites `ANY` to `AAAA` upstream and applies the zone's
+normal synthesis/filter rules, so an `ANY` query returns something the client
+can actually use rather than whatever the upstream happens to do.
+
+**4. `PTR` for a Pref64 address is resolved, not delegated.**
+RFC 6147 §5.3.1 offers two conformant strategies (answer authoritatively for
+the Pref64, or synthesise a `CNAME` into `in-addr.arpa`). `ydn64` does
+neither: it rewrites the `ip6.arpa` query into the corresponding
+`in-addr.arpa` query, resolves it itself, and returns the real `PTR` data
+under the original name. This gives the client useful reverse data in one
+round trip.
+
+**5. A query matching no configured zone returns `NXDOMAIN`.**
+`Dns64Zones` acts as an allow-list. If you want a transparent catch-all, keep
+the `["."]` zone that `-genconf` produces.
+
+### Architectural limitations
+
+These follow from `ydn64` being a **TUN-less userspace transport proxy**
+rather than a packet translator. TCP is terminated inside the gVisor netstack
+and re-originated over an ordinary OS socket; UDP and ICMP Echo are relayed
+the same way. There is no IP-header translation anywhere in the path.
+
+- **No RFC 7915 header translation.** Traffic Class/DSCP, ECN, and Hop
+  Limit ↔ TTL are not carried across the translator; synthesised IPv6 replies
+  use a fixed Hop Limit.
+- **ICMP errors are not translated** — only Echo/Echo Reply. As a result
+  `traceroute` through NAT64 does not work, and Path MTU Discovery is not
+  supported in either direction.
+- **No IPv4-initiated flows.** `ydn64` has no inbound IPv4 listener, so only
+  the "IPv6 client → IPv4 server" direction of RFC 6144 is supported.
+- **Fragmented IPv6 packets are not handled** (RFC 6146 §3.4).
+- **Mapping is address-and-port-dependent ("symmetric NAT").** RFC 6146 §5.2
+  requires Endpoint-Independent Mapping; `ydn64` opens a separate outbound
+  socket per destination, so a client's external port differs per peer. This
+  means **STUN/ICE-based NAT traversal (WebRTC, most P2P) does not currently
+  work through `ydn64`.**
+- **No DNSSEC validation.** `ydn64` is a security-oblivious DNS64 in the
+  RFC 6147 §3 sense; synthesised answers cannot be validated by the client.
+- **No RFC 8781 PREF64 discovery.** A TUN-less node has no L2 presence and
+  cannot emit Router Advertisements, so clients that prefer RA-based
+  discovery (recent iOS/Android) must use RFC 7050 (`ipv4only.arpa`) or be
+  configured manually.
+
 ## More
 
 See [AGENTS.md](AGENTS.md) for detailed guidance on the codebase,
