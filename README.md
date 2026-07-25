@@ -15,19 +15,20 @@ two services to the Yggdrasil network:
 Both services run on top of a single gVisor userspace netstack attached to
 the Yggdrasil core — there is no OS TUN device anywhere in this stack.
 
-## Build / run
+## 1. Build / Download
 
 ```sh
 ./build                              # build with version stamping, outputs ./ydn64
 go build -o ./ydn64 ./cmd/ydn64      # plain build without version stamping
-
-./ydn64 -genconf > ./tmp/ydn64.conf   # print a new config to stdout, redirect to save it
-./ydn64 -useconffile ./tmp/ydn64.conf # run the node + services
 ```
 
-## Configuration
+## 2. Configuration
 
-`-genconf` generates a complete, ready-to-run config — private key, NAT64
+```sh
+./ydn64 -genconf > ./tmp/ydn64.conf   # print a new config to stdout, redirect to save it
+```
+
+`-genconf` generates a complete, almost ready-to-run config — private key, NAT64
 pool, DNS64 listen address, etc. are all pre-derived automatically. In
 practice you only need to edit two fields before running:
 
@@ -37,7 +38,24 @@ practice you only need to edit two fields before running:
   Yggdrasil address(es) you want permitted to use this node's NAT64/DNS64
   services (see below).
 
+```
+  Peers: [tcp://xx.xx.xx.xx:XXXX]
+  AllowedSources: ["201:aaaa:bbbb:cccc:dddd:eeee:ffff:1234/128"]
+```
+
 Everything else is configured with secure, working defaults out of the box.
+
+## 3. Run
+
+```sh
+./ydn64 -useconffile ./tmp/ydn64.conf # run the node + services
+```
+
+Use node ip or config `Dns64Listen` value as DNS for yggdrasil clients:
+
+```
+  Dns64Listen: "[200:aaaa:bbbb:cccc:dddd:eeee:ffff:1234]:53"
+```
 
 ## Running with Docker
 

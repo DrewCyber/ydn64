@@ -7,6 +7,7 @@
  - [x] Alfis dns zone + tests
  - [x] Rework test environment
  - [x] TCP socket for dns64 (especially for ANY)
+ - [ ] DNS: Pass-through zone (tests)
  - [ ] End2end DNS config tests
  - [ ] CGO_ENABLED
  - [ ] Nat64 check by RFCs list
