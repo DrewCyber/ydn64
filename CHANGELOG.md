@@ -12,6 +12,19 @@ moved under the corresponding version heading.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-28
+
+- Upgraded the vendored upstream `yggdrasil-network/yggdrasil-go` from
+  v0.5.13 to **v0.5.14**.
+- **New config option `GroupPassword`** (from upstream v0.5.14): traffic is
+  only allowed to/from nodes sharing the same group password, letting you
+  form a private sub-network. Empty/unset (the default) keeps public
+  connectivity; if set, the node will no longer be able to reach public
+  services or hosts. It does not affect peering connections or routing.
+  Included in `-genconf` output and applied at startup; like the other
+  Yggdrasil-core settings it is **not** reloadable via `SIGHUP` and
+  requires a restart.
+
 ## [0.3.0] - 2026-07-24
 
 - **Fixed a DNS64 bug causing `DNS_PROBE_FINISHED_BAD_CONFIG`-style failures

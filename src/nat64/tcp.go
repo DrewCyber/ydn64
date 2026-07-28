@@ -1,9 +1,9 @@
 package nat64
 
 import (
-	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"time"
 
 	"github.com/gologme/log"
@@ -36,7 +36,7 @@ func (s *Service) handleTCP(req *tcp.ForwarderRequest, logger *log.Logger) {
 
 	// Extract embedded IPv4 from the last 4 bytes of the pool6 destination.
 	ipv4 := net.IP(dstSlice[12:16])
-	dstAddr := fmt.Sprintf("%s:%d", ipv4.String(), id.LocalPort)
+	dstAddr := net.JoinHostPort(ipv4.String(), strconv.Itoa(int(id.LocalPort)))
 
 	// CreateEndpoint completes the three-way handshake synchronously.
 	var wq waiter.Queue

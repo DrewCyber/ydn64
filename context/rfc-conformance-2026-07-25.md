@@ -558,18 +558,23 @@ Not implemented. Low priority; PCP deployment is rare and it would require a PCP
 
 Ordered by *user-visible impact per unit of work*, not by RFC section number.
 
+> **Before implementing:** read **§14 (Build vs. reuse)**. Several items below are
+> substantially cheaper than their tier suggests, because gVisor — already a
+> dependency — provides the primitive, or because CoreDNS's DNS64 plugin is a
+> directly adaptable reference. Affected rows are marked **→ §14**.
+
 ### Tier 1 — Small, high-value, no architectural change
 
 | # | Item | RFC |
 |---|---|---|
-| 1 | UDP checksum `0x0000` → `0xFFFF` | RFC 8200 §8.1 |
+| 1 | UDP checksum `0x0000` → `0xFFFF` | RFC 8200 §8.1 — **→ §14** |
 | 2 | Drop inbound IPv6 packets with a source in Pref64::/n | RFC 6146 §3.5, §5.4 |
 | 3 | Raise `Nat64UdpTimeout` default to 300 s and enforce a 120 s floor in `Validate()` | RFC 6146 §3.5.1, §4; RFC 4787 REQ-5 |
 | 4 | Raise the ICMP session timeout to 60 s and make it configurable | RFC 6146 §3.5.3, §4; RFC 5508 REQ-2 |
-| 5 | Preserve the upstream RCODE (especially NXDOMAIN) in DNS64 responses | RFC 6147 §5.1.2 |
-| 6 | Set the synthetic AAAA TTL to `min(A TTL, SOA TTL)`, fallback `min(A TTL, 600 s)` | RFC 6147 §5.1.7 |
+| 5 | Preserve the upstream RCODE (especially NXDOMAIN) in DNS64 responses | RFC 6147 §5.1.2 — **→ §14** |
+| 6 | Set the synthetic AAAA TTL to `min(A TTL, SOA TTL)`, fallback `min(A TTL, 600 s)` | RFC 6147 §5.1.7 — **→ §14** |
 | 7 | Randomise the upstream DNS query ID; restore the client's ID on the response | RFC 5452 §9.2 |
-| 8 | Reject non-IN qclass queries (behave as if no DNS64 were configured) | RFC 6147 §5.1 |
+| 8 | Reject non-IN qclass queries (behave as if no DNS64 were configured) | RFC 6147 §5.1 — **→ §14** |
 | 9 | Clear the AD bit on any response ydn64 did not validate | RFC 6147 §5.5, RFC 4035 |
 | 10 | Answer `ipv4only.arpa` locally with synthesised addresses; add a test case | RFC 7050, RFC 8880 |
 
@@ -577,25 +582,25 @@ Ordered by *user-visible impact per unit of work*, not by RFC section number.
 
 | # | Item | RFC |
 |---|---|---|
-| 11 | EDNS(0) OPT parsing + `resp.Truncate()` + TC bit | RFC 6891, RFC 1035 §4.2.1, RFC 6147 §5.4 |
-| 12 | Preserve the upstream authority + additional sections in synthesised responses (enables SOA-based negative caching) | RFC 6147 §5.3.2, §5.4, RFC 2308 |
-| 13 | Preserve the CNAME/DNAME chain; set the synthetic AAAA owner name to the A record's NAME | RFC 6147 §5.1.5, §5.1.7 |
+| 11 | EDNS(0) OPT parsing + `resp.Truncate()` + TC bit | RFC 6891, RFC 1035 §4.2.1, RFC 6147 §5.4 — **→ §14** |
+| 12 | Preserve the upstream authority + additional sections in synthesised responses (enables SOA-based negative caching) | RFC 6147 §5.3.2, §5.4, RFC 2308 — **→ §14** |
+| 13 | Preserve the CNAME/DNAME chain; set the synthetic AAAA owner name to the A record's NAME | RFC 6147 §5.1.5, §5.1.7 — **→ §14** |
 | 14 | Per-IPv4-range prefix selection + exclusion of special-use IPv4 ranges | RFC 6147 §5, §5.1.7; RFC 6052 §3.1 — **also closes audit §1.1** |
 | 15 | `Dns64ExcludedPrefixes` (default `::ffff:0:0/96`) — the conformant way to express ydn64's existing intent | RFC 6147 §5.1.4 |
 | 16 | Honour `CD=1 && DO=1` by disabling synthesis and passing through | RFC 6147 §5.5(3) |
 | 17 | Rewrite the ICMP Identifier to a NAT-allocated value; key sessions on it | RFC 6146 §3.5.3; RFC 5508 REQ-1 — **also closes audit §1.3** |
 | 18 | Session/BIB caps and per-source quotas | RFC 6146 §5.3 (MUST) — **also closes audit §1.4** |
 | 19 | TCP idle timeout (`TCP_EST` 2 h / `TCP_TRANS` 4 min semantics) | RFC 5382 REQ-5 — **also closes audit §5.4** |
-| 20 | Walk the IPv6 extension-header chain in `interceptPacket` | RFC 8200 §4; prerequisite for #21 |
+| 20 | Walk the IPv6 extension-header chain in `interceptPacket` | RFC 8200 §4; prerequisite for #21 — **→ §14**, gVisor provides this |
 
 ### Tier 3 — Large; substantial new subsystems
 
 | # | Item | RFC |
 |---|---|---|
-| 21 | IPv6 fragment reassembly with a bounded resource budget and ≥ 2 s window | RFC 6146 §3.4 (MUST), §5.3 |
+| 21 | IPv6 fragment reassembly with a bounded resource budget and ≥ 2 s window | RFC 6146 §3.4 (MUST), §5.3 — **→ §14**, largely avoidable via `udp.NewForwarder` |
 | 22 | ICMP **error** translation (Dest Unreachable, Time Exceeded, Parameter Problem, PTB) incl. embedded-packet rewriting — restores `traceroute` and fast-fail | RFC 6146 §3.6.1/§3.6.2, RFC 7915 §4.2/§5.2, RFC 5508 REQ-3/4 |
 | 23 | ICMPv6 **Packet Too Big** generation; PMTUD support | RFC 4443 §3.2, RFC 7915 |
-| 24 | Full RFC 6052 prefix-length support (`/32`–`/64`) | RFC 6052 §2.2, RFC 6146 §3.5.4 |
+| 24 | Full RFC 6052 prefix-length support (`/32`–`/64`) | RFC 6052 §2.2, RFC 6146 §3.5.4 — **→ §14**, ~25 lines with the CoreDNS reference; not really Tier 3 |
 | 25 | RFC 6147-conformant PTR strategy (pick Option 1 or Option 2) | RFC 6147 §5.3.1 |
 | 26 | DNSSEC validation (vDNS64 mode) | RFC 6147 §5.5 |
 
@@ -711,3 +716,134 @@ The fix is the RFC 6146 §3.1 **Binding Information Base** that ydn64 currently 
 - **2c.** Endpoint-independent **filtering** (RFC 4787 REQ-8) is a separate decision from mapping, and it is a genuine security loosening: an unconnected socket will accept datagrams from any source. Options: (i) endpoint-independent — best traversal, weakest filtering; (ii) address-dependent — accept from any port of an IPv4 address the client has already contacted, which is enough for most ICE cases and much safer; (iii) keep address-and-port-dependent and rely on ICE's own connectivity checks to open the pinhole first. Which do you want as the default?
 - **2d.** Are there other Yggdrasil-side concerns? A client behind ydn64 already has a *stable, publicly routable* Yggdrasil address — for peer-to-peer **between two Yggdrasil nodes**, NAT64 isn't involved at all and P2P already works. EIM only matters for P2P between a Yggdrasil client and a **legacy IPv4 peer**. Is that the actual use case (e.g. joining a public WebRTC/BitTorrent swarm), or is Yggdrasil-to-Yggdrasil P2P what you had in mind?
 - **2e.** Priority relative to Tier 1? Tier 1 is ~10 small fixes with immediate benefit. EIM is a focused but non-trivial rework of `src/nat64/udp.go` plus session caps. Should Tier 1 land first, or is P2P support the headline feature to chase?
+
+---
+
+## 14. Build vs. reuse — third-party libraries
+
+Survey of existing NAT64/DNS64 implementations in Go and Rust, assessed against
+this project's constraints (Go 1.25, TUN-less, no root, **0BSD** licence,
+gVisor already vendored).
+
+**Verdict: add no new third-party dependencies.** Use CoreDNS's DNS64 plugin as
+a *reading reference*, lean much harder on gVisor — which is already a
+dependency and is currently underused — and write the NAT64 session layer from
+scratch. This materially reduces the estimated effort for items #20, #21 and
+#24, and gives a correct reference implementation for six Tier 1/Tier 2 DNS64
+items.
+
+### 14.1 Licence constraint
+
+`LICENSE` is the **BSD Zero Clause License (0BSD)** — the most permissive
+licence there is. Two consequences:
+
+- **GPL-3.0 code cannot be used at all**, not even copied in fragments. This
+  rules out the entire Rust option below.
+- **Apache-2.0 code (CoreDNS) can be vendored**, but only with attribution and
+  a `NOTICE`, which would introduce a second, more restrictive licence into an
+  otherwise 0BSD tree. Recommendation: **read the algorithm and reimplement**
+  rather than copy-paste, so the tree stays uniformly 0BSD.
+
+### 14.2 Rust — not applicable
+
+| Project | Licence | Assessment |
+|---|---|---|
+| [`ewpratten/protomask`](https://github.com/ewpratten/protomask) — userspace NAT64 + CLAT | **GPL-3.0** | ❌ Licence-incompatible with 0BSD. Also **TUN-based** (requires root), which contradicts ydn64's central design property. 1 star, 1 contributor, last commit ~2 years ago. |
+| [`rfc6052`](https://crates.io/crates/rfc6052) crate (address embed/extract) | **GPL-3.0** | ❌ Licence-incompatible. 208 SLoC, single version, ~1.9k lifetime downloads, unmaintained. The equivalent Go code is ~25 lines (see §14.3). |
+
+A Rust rewrite is not under consideration, so these could only ever have served
+as references — and the GPL makes even that legally awkward. **No action.**
+
+### 14.3 Go — CoreDNS `plugin/dns64` is a valuable *reference*, not a dependency
+
+Apache-2.0. It is the only maintained Go DNS64 implementation.
+
+**It cannot be imported.** The plugin is welded to CoreDNS's runtime:
+`coredns/caddy`, `core/dnsserver`, the `plugin` registry, `plugin/pkg/nonwriter`,
+`plugin/pkg/response`, `plugin/pkg/upstream`, `request`, and Prometheus metrics.
+Pulling it in would drag a web server and a metrics stack into a small binary.
+
+**It is not a replacement either.** Its own README "Bugs" section admits it
+lacks per-IPv4-range prefix mapping, PTR handling, and DNSSEC awareness — i.e.
+the *same* gaps identified in §8 of this report — while having *fewer*
+features than ydn64, which already has zones, caching, PTR resolution and TCP.
+
+**But its ~70-line `Synthesize()` is a correct, unit-tested reference for six
+roadmap items at once:**
+
+| Roadmap item | CoreDNS pattern to follow |
+|---|---|
+| Tier 1 #5 (NXDOMAIN) | `responseShouldDNS64()` returns `false` for `response.NameError`, so the upstream RCODE survives |
+| Tier 1 #6 (TTL) | scans `origResponse.Ns` for a `SOA`, defaults `SOATtl = 600`, then `ttl := min(rr.Header().Ttl, SOATtl)` |
+| Tier 1 #8 (qclass) | `requestShouldIntercept()` checks `req.QClass() == dns.ClassINET` |
+| Tier 2 #11 (TC bit) | `ret.Truncated = resp.Truncated` propagated onto the synthesised response |
+| Tier 2 #12 (sections) | `ret.Extra = resp.Extra; ret.Ns = resp.Ns`, annotated with the RFC 6147 §5.3.2 requirement verbatim |
+| Tier 2 #13 (CNAME chain) | `if header.Rrtype != dns.TypeA { ret.Answer = append(ret.Answer, rr); continue }` preserves non-A RRs; the synthetic AAAA's owner name is `header.Name` taken **from the A record**, not from the question |
+| Tier 3 #24 (prefix lengths) | `to6(prefix *net.IPNet, addr net.IP)` implements **all** RFC 6052 prefix lengths incl. the u-byte skip (`if i == 8 { i++ }`) in ~25 lines; `parsePrefix` validates `n%8 == 0 && n >= 32 && n <= 96` |
+
+This drops #24 out of Tier 3 in practice — the algorithm is small and fully
+specified; only the per-range prefix *selection* (#14) remains non-trivial.
+
+Its `dns64_test.go` table (standard flow, empty A response, non-NXDOMAIN error,
+NXDOMAIN, existing AAAA, truncated A response) is directly adaptable as ydn64's
+**first Go unit tests** — see audit §6.1, which notes the repo currently has no
+`_test.go` files at all.
+
+### 14.4 Go — gVisor is already vendored and badly underused
+
+This is the largest single win available, and it costs **zero new
+dependencies**. All symbols below were verified present in the pinned version
+(`gvisor.dev/gvisor v0.0.0-20250812171554-968e93457fe6`).
+
+| Available API | Replaces / enables |
+|---|---|
+| `header.PseudoHeaderChecksum()`, `header.UDP.CalculateChecksum/IsChecksumValid/SetChecksum` (`pkg/tcpip/header/checksum.go`) | The hand-rolled `ipv6UpperLayerChecksum` in `src/nat64/packet.go`, **including the Tier 1 #1 zero → `0xFFFF` bug**, which gVisor already handles |
+| Typed accessors `header.IPv6`, `header.UDP`, `header.ICMPv6`, `header.ICMPv4` | The hardcoded offsets `pkt[6]`, `pkt[8:24]`, `pkt[24:40]`, `pkt[40:42]` in `src/nat64/service.go` and `src/nat64/udp.go`, plus the missing length validation flagged in §7 |
+| `header.MakeIPv6PayloadIterator()` + `IPv6PayloadIterator.Next()` / `NextHeaderIdentifier()` (`pkg/tcpip/header/ipv6_extension_headers.go`) | **Tier 2 #20** (extension-header chain walking) essentially for free |
+| `header.IPv6Fragment` (`pkg/tcpip/header/ipv6_fragment.go`) | Fragment-header parsing for **Tier 3 #21** |
+| **`udp.NewForwarder()`** (`pkg/tcpip/transport/udp/forwarder.go`) — the exact analogue of the `tcp.NewForwarder` already used in `src/nat64/tcp.go` | See below — potentially collapses #20 and most of #21 |
+| `pkg/tcpip/transport/icmp` endpoints | An alternative to the raw `CAP_NET_RAW` socket for the ICMPv6 side |
+
+**The `udp.NewForwarder` opportunity.** ydn64 currently intercepts UDP at the
+NIC level (`Service.interceptPacket` → `interceptUDPPacket`), which is why it
+must parse IPv6 headers by hand and cannot see reassembled datagrams. Routing
+UDP through `udp.NewForwarder` instead — mirroring what TCP already does —
+would inherit **fragment reassembly, checksum validation, extension-header
+parsing and length validation** from gVisor's IPv6 network endpoint. That turns
+#20 and #21 from "implement two new subsystems" into "delete code".
+
+Two caveats before committing to this:
+
+1. **Needs a prototype.** It must be verified that Promiscuous + Spoofing mode
+   allows pool6-destined UDP to reach the transport demuxer, exactly as it does
+   for TCP. This is the same class of NIC-flag subtlety documented in
+   `AGENTS.md` under "gVisor netstack gotchas".
+2. **`pkg/tcpip/network/internal/fragmentation` is a Go `internal/` package**
+   and therefore **cannot be imported by ydn64** (confirmed: it is imported by
+   `network/ipv6/ipv6.go`). Reassembly is reachable *only* through gVisor's
+   IPv6 endpoint — i.e. via the forwarder route. If the NIC-level interceptor
+   is kept, #21 means writing a reassembler by hand, with all the resource
+   accounting RFC 6146 §5.3 demands.
+
+### 14.5 Must be written from scratch — the NAT64 session/BIB layer
+
+No Go library exists. The mature implementations are all C, and all assume
+privileges and an interface ydn64 does not have:
+
+| Implementation | Why it does not apply |
+|---|---|
+| **Jool** | Linux kernel module (plus a netfilter/iptables integration). Requires root and kernel build tooling. |
+| **Tayga** | C userspace, but TUN-based — requires root and a real interface. |
+| **BIND / Unbound / Knot DNS64** | C; full resolvers. Correct DNS64 reference behaviour, but not embeddable. |
+
+None of these map onto a TUN-less, unprivileged, gVisor-backed design. The
+Binding Information Base, session table, port allocator and resource caps
+(items #17, #18, #19, #27) are ydn64-specific and must be implemented here.
+
+### 14.6 Net effect on the roadmap
+
+- **Effort down:** #1, #20, #21, #24 (gVisor); #5, #6, #8, #11, #12, #13
+  (CoreDNS reference).
+- **Effort unchanged:** #14 (per-range prefix selection), #17, #18, #19, #22,
+  #23, #25, #26, #27–#30 — all genuinely ydn64-specific.
+- **New dependencies required: none.**

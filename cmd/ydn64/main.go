@@ -210,6 +210,9 @@ func main() {
 			}
 			opts = append(opts, core.AllowedPublicKey(k))
 		}
+		if ygCfg.GroupPassword != "" {
+			opts = append(opts, core.GroupPassword(ygCfg.GroupPassword))
+		}
 		if n.core, err = core.New(ygCfg.Certificate, logger, opts...); err != nil {
 			logger.Fatalf("failed to start yggdrasil core: %v", err)
 		}
@@ -341,7 +344,8 @@ func main() {
 // recreating the gVisor NIC/routes, rebinding sockets, or reconstructing the
 // Yggdrasil core's identity/peers/listeners — are: PrivateKey, Peers,
 // InterfacePeers, Listen, MulticastInterfaces, NodeInfo(Privacy),
-// AllowedPublicKeys, Nat64Enable, Nat64Pool, Dns64Enable, Dns64Listen. If any
+// AllowedPublicKeys, GroupPassword, Nat64Enable, Nat64Pool, Dns64Enable,
+// Dns64Listen. If any
 // of those differ from the running config, a warning is logged and the
 // change is ignored; a full restart is required to apply them.
 func reloadConfig(
