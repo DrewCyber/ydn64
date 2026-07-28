@@ -12,6 +12,10 @@ moved under the corresponding version heading.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-28
+
+- Github rebuild
+
 ## [0.4.0] - 2026-07-28
 
 - Upgraded the vendored upstream `yggdrasil-network/yggdrasil-go` from
