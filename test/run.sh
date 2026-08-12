@@ -43,11 +43,11 @@ cmd_build() {
 }
 
 cmd_netup() {
-  $PODMAN network exists "$NET_EGRESS" 2>/dev/null || {
+  $PODMAN network inspect "$NET_EGRESS" >/dev/null 2>&1 || {
     log "creating network $NET_EGRESS ($SUBNET_EGRESS, NAT'd)"
     $PODMAN network create --subnet "$SUBNET_EGRESS" "$NET_EGRESS"
   }
-  $PODMAN network exists "$NET_YGG" 2>/dev/null || {
+  $PODMAN network inspect "$NET_YGG" >/dev/null 2>&1 || {
     log "creating network $NET_YGG ($SUBNET_YGG, --internal, no egress)"
     $PODMAN network create --internal --subnet "$SUBNET_YGG" "$NET_YGG"
   }

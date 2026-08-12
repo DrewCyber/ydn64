@@ -45,7 +45,7 @@ RFC 6147 — DNS64: DNS Extensions for NAT from IPv6 Clients to IPv4 Servers
                                                                    [PARTIAL]
     The primary DNS64 specification. Synthesis, zone rules, forwarding,
     caching and PTR reversal work. Outstanding:
-      - §5.1.2       return the upstream NXDOMAIN instead of NOERROR   [TODO]
+      - §5.1.2       return the upstream NXDOMAIN instead of NOERROR   [DONE]
       - §5.1.5/5.1.7 preserve the CNAME chain; take the synthetic AAAA
                      owner name from the A record                      [TODO]
       - §5.1.7       synthetic TTL = min(A TTL, SOA TTL)               [TODO]
