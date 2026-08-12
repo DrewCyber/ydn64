@@ -188,15 +188,33 @@ func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string
 		return nil, err
 	}
 
-	answer := p.filterAAAA(upResp.Answer, z)
-	if containsAAAA(answer) {
-		p.cache.set(q.Name, answer)
+	// RFC 6147 §5.1.2: A result with RCODE=3 (Name Error / NXDOMAIN) is returned to the client immediately.
+	if upResp.Rcode == dns.RcodeNameError {
 		resp := new(dns.Msg)
 		req.CopyTo(resp)
-		resp.Answer = answer
+		resp.Rcode = dns.RcodeNameError
+		resp.Ns = upResp.Ns
+		resp.Extra = upResp.Extra
 		resp.Question[0].Qtype = dns.TypeAAAA
 		resp.Response = true
 		return resp, nil
+	}
+
+	var answer []dns.RR
+
+	// If the AAAA response RCODE is 0 (No error condition), filter and check for usable AAAA.
+	// Any other RCODE is treated as though the RCODE were 0 and the answer section were empty (falling through to A lookup).
+	if upResp.Rcode == dns.RcodeSuccess {
+		answer = p.filterAAAA(upResp.Answer, z)
+		if containsAAAA(answer) {
+			p.cache.set(q.Name, answer)
+			resp := new(dns.Msg)
+			req.CopyTo(resp)
+			resp.Answer = answer
+			resp.Question[0].Qtype = dns.TypeAAAA
+			resp.Response = true
+			return resp, nil
+		}
 	}
 
 	// No usable AAAA — try synthesising from A records.
@@ -226,7 +244,34 @@ func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string
 
 	resp := new(dns.Msg)
 	req.CopyTo(resp)
-	resp.Answer = answer
+
+	// RFC 6147 §5.1.6: If the A RR query results in an empty answer or in an error,
+	// then the empty result or error is used as the basis for the answer returned to the client.
+	if aResp.Rcode != dns.RcodeSuccess || len(answer) == 0 {
+		resp.Rcode = aResp.Rcode
+		// Filter out A records but preserve any other records (e.g. CNAMEs/DNAMEs)
+		var nonARecords []dns.RR
+		for _, rr := range aResp.Answer {
+			if _, ok := rr.(*dns.A); !ok {
+				nonARecords = append(nonARecords, rr)
+			}
+		}
+		resp.Answer = nonARecords
+	} else {
+		resp.Rcode = dns.RcodeSuccess
+		// Preserve CNAMEs/DNAMEs in the response along with synthetic AAAA records
+		var answerWithCNAMEs []dns.RR
+		for _, rr := range aResp.Answer {
+			if _, ok := rr.(*dns.A); !ok {
+				answerWithCNAMEs = append(answerWithCNAMEs, rr)
+			}
+		}
+		answerWithCNAMEs = append(answerWithCNAMEs, answer...)
+		resp.Answer = answerWithCNAMEs
+	}
+
+	resp.Ns = aResp.Ns
+	resp.Extra = aResp.Extra
 	resp.Question[0].Qtype = dns.TypeAAAA
 	resp.Response = true
 	return resp, nil
