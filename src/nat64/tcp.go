@@ -29,6 +29,11 @@ func (s *Service) handleTCP(req *tcp.ForwarderRequest, logger *log.Logger) {
 	// Source filter.
 	srcSlice := id.RemoteAddress.AsSlice()
 	srcIP := net.IP(srcSlice)
+	// Source address must NOT be in the pool6 subnet (RFC 6146 §3.5 / §5.4).
+	if s.pool6Net.Contains(srcIP) {
+		req.Complete(true)
+		return
+	}
 	if !s.isAllowed(srcIP) {
 		req.Complete(true)
 		return
