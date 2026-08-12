@@ -49,6 +49,10 @@ func (s *Service) interceptICMPPacket(pkt []byte) bool {
 	}
 
 	srcIP := net.IP(pkt[8:24])
+	// Source address must NOT be in the pool6 subnet (RFC 6146 §3.5 / §5.4).
+	if s.pool6Net.Contains(srcIP) {
+		return true // consumed (dropped)
+	}
 	if !s.isAllowed(srcIP) {
 		return true // consumed (dropped)
 	}
