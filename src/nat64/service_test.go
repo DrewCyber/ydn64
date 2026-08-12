@@ -10,7 +10,7 @@ import (
 func TestNAT64InboundSourceCheck(t *testing.T) {
 	cfg := config.NAT64Config{
 		Pool6:      "300:1:2:3::/64",
-		UDPTimeout: 30,
+		UDPTimeout: 300,
 	}
 	allowedSources := []string{"200:a:b:c::/64"}
 
