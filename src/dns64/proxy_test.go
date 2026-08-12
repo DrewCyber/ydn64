@@ -147,3 +147,103 @@ func TestDNS64ErrorRcodeHandling(t *testing.T) {
 		})
 	}
 }
+
+func TestIPv4OnlyARPALocalAnswering(t *testing.T) {
+	p := &proxy{
+		cache: newCache(300*time.Second, 600*time.Second),
+	}
+
+	prefix := net.ParseIP("64:ff9b::")
+	if prefix == nil {
+		t.Fatal("failed to parse prefix")
+	}
+
+	// We set up two zones: one with a prefix, and one without.
+	p.reload("127.0.0.1:53", IAIgnore, []zone{
+		{
+			domains:             []string{"."},
+			prefix:              prefix,
+			returnIPv4Addresses: false,
+			returnIPv6Addresses: false,
+		},
+	})
+
+	// Test case 1: AAAA query on catch-all zone with prefix
+	{
+		req := new(dns.Msg)
+		req.SetQuestion("ipv4only.arpa.", dns.TypeAAAA)
+		resp := p.handle(req)
+
+		if resp.Rcode != dns.RcodeSuccess {
+			t.Errorf("expected RcodeSuccess, got %d", resp.Rcode)
+		}
+		if len(resp.Answer) != 2 {
+			t.Errorf("expected 2 answers, got %d", len(resp.Answer))
+		}
+		for i, expectedIP := range []string{"64:ff9b::c000:aa", "64:ff9b::c000:ab"} { // 192.0.0.170 and 192.0.0.171
+			if i < len(resp.Answer) {
+				aaaa, ok := resp.Answer[i].(*dns.AAAA)
+				if !ok {
+					t.Fatalf("expected AAAA record, got %T", resp.Answer[i])
+				}
+				if aaaa.AAAA.String() != net.ParseIP(expectedIP).String() {
+					t.Errorf("expected %s, got %s", expectedIP, aaaa.AAAA.String())
+				}
+				if aaaa.Header().Ttl != 60 {
+					t.Errorf("expected TTL 60, got %d", aaaa.Header().Ttl)
+				}
+			}
+		}
+	}
+
+	// Test case 2: A query on catch-all zone
+	{
+		req := new(dns.Msg)
+		req.SetQuestion("ipv4only.arpa.", dns.TypeA)
+		resp := p.handle(req)
+
+		if resp.Rcode != dns.RcodeSuccess {
+			t.Errorf("expected RcodeSuccess, got %d", resp.Rcode)
+		}
+		if len(resp.Answer) != 2 {
+			t.Errorf("expected 2 answers, got %d", len(resp.Answer))
+		}
+		for i, expectedIP := range []string{"192.0.0.170", "192.0.0.171"} {
+			if i < len(resp.Answer) {
+				a, ok := resp.Answer[i].(*dns.A)
+				if !ok {
+					t.Fatalf("expected A record, got %T", resp.Answer[i])
+				}
+				if a.A.String() != expectedIP {
+					t.Errorf("expected %s, got %s", expectedIP, a.A.String())
+				}
+				if a.Header().Ttl != 60 {
+					t.Errorf("expected TTL 60, got %d", a.Header().Ttl)
+				}
+			}
+		}
+	}
+
+	// Test case 3: Zone with prefix == nil
+	p.reload("127.0.0.1:53", IAIgnore, []zone{
+		{
+			domains:             []string{"."},
+			prefix:              nil,
+			returnIPv4Addresses: false,
+			returnIPv6Addresses: false,
+		},
+	})
+
+	{
+		req := new(dns.Msg)
+		req.SetQuestion("ipv4only.arpa.", dns.TypeAAAA)
+		resp := p.handle(req)
+
+		if resp.Rcode != dns.RcodeSuccess {
+			t.Errorf("expected RcodeSuccess, got %d", resp.Rcode)
+		}
+		if len(resp.Answer) != 0 {
+			t.Errorf("expected 0 answers, got %d", len(resp.Answer))
+		}
+	}
+}

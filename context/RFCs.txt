@@ -185,15 +185,13 @@ D. PREFIX DISCOVERY AND CLIENT INTEGRATION
 ------------------------------------------
 
 RFC 7050 — Discovery of the IPv6 Prefix Used for IPv6 Address
-           Synthesis                                               [PARTIAL]
-    Works incidentally: an AAAA query for ipv4only.arpa falls through the
-    catch-all zone's synthesis path and yields pool6::192.0.0.170/171.
-    Should be made intentional and covered by a test — this is what
-    iOS/Android/CLAT clients actually probe.                          [TODO]
+           Synthesis                                                  [DONE]
+    Implemented intentionally: AAAA queries for ipv4only.arpa. are
+    intercepted and resolved locally. Covered by unit tests.
 
-RFC 8880 — Special Use Domain Name 'ipv4only.arpa'                    [TODO]
-    Updates RFC 7050. §7.1 says the resolver SHOULD answer ipv4only.arpa
-    locally rather than querying upstream.
+RFC 8880 — Special Use Domain Name 'ipv4only.arpa'                    [DONE]
+    Updates RFC 7050. §7.1 resolved: ipv4only.arpa. is handled locally
+    for both A and AAAA queries instead of querying upstream.
 
 RFC 8781 — Discovering PREF64 in Router Advertisements                 [N/A]
     Recent iOS/Android prefer this over RFC 7050. A TUN-less node has no
