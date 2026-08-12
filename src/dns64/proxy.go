@@ -50,6 +50,13 @@ var yggdrasilRange = func() *net.IPNet {
 	return n
 }()
 
+// ipv4OnlyARPAIPs are the two IPv4 addresses specified in RFC 7050 / RFC 8880
+// for local lookup and prefix discovery.
+var ipv4OnlyARPAIPs = []net.IP{
+	net.ParseIP("192.0.0.170"),
+	net.ParseIP("192.0.0.171"),
+}
+
 // lookup performs a UDP DNS query and returns the response. Forwarders in
 // the Yggdrasil address range (200::/7) are dialled through the embedded
 // gVisor netstack; everything else uses the host OS network stack.
@@ -169,6 +176,26 @@ func (p *proxy) handle(req *dns.Msg) *dns.Msg {
 //  2. Query upstream for AAAA — pass through real AAAA if zone.returnIPv6Addresses.
 //  3. If no usable AAAA, query A and synthesise from prefix (if configured).
 func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string) (*dns.Msg, error) {
+	// Intercept ipv4only.arpa. queries and answer locally per RFC 7050 & RFC 8880.
+	if strings.ToLower(q.Name) == "ipv4only.arpa." {
+		resp := new(dns.Msg)
+		req.CopyTo(resp)
+		resp.Question[0].Qtype = dns.TypeAAAA
+		resp.Response = true
+		resp.Rcode = dns.RcodeSuccess
+
+		if z.prefix != nil {
+			for _, ip4 := range ipv4OnlyARPAIPs {
+				synth := makeSynthesisedAAAA(z.prefix, ip4)
+				rr, err := dns.NewRR(fmt.Sprintf("%s 60 IN AAAA %s", q.Name, synth.String()))
+				if err == nil && rr != nil {
+					resp.Answer = append(resp.Answer, rr)
+				}
+			}
+		}
+		return resp, nil
+	}
+
 	// Cache hit?
 	if cached, ok := p.cache.get(q.Name); ok {
 		resp := new(dns.Msg)
@@ -370,6 +397,22 @@ func (p *proxy) synthesiseFromA(rrs []dns.RR, name string, z *zone) []dns.RR {
 
 // handleA returns A records only if zone.returnIPv4Addresses is set.
 func (p *proxy) handleA(req *dns.Msg, q *dns.Question, z *zone, server string) (*dns.Msg, error) {
+	// Intercept ipv4only.arpa. queries and answer locally per RFC 8880.
+	if strings.ToLower(q.Name) == "ipv4only.arpa." {
+		resp := new(dns.Msg)
+		req.CopyTo(resp)
+		resp.Question[0].Qtype = dns.TypeA
+		resp.Response = true
+		resp.Rcode = dns.RcodeSuccess
+		for _, ip4 := range ipv4OnlyARPAIPs {
+			rr, err := dns.NewRR(fmt.Sprintf("%s 60 IN A %s", q.Name, ip4.String()))
+			if err == nil && rr != nil {
+				resp.Answer = append(resp.Answer, rr)
+			}
+		}
+		return resp, nil
+	}
+
 	upReq := new(dns.Msg)
 	req.CopyTo(upReq)
 	upReq.Question = []dns.Question{*q}
