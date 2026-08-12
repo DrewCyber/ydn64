@@ -157,7 +157,9 @@ func (c *AppConfig) Validate() error {
 			return fmt.Errorf("Nat64Pool %q is not a valid CIDR: %w", c.Nat64Pool, err)
 		}
 		if c.Nat64UdpTimeout <= 0 {
-			c.Nat64UdpTimeout = 30
+			c.Nat64UdpTimeout = 300
+		} else if c.Nat64UdpTimeout < 120 {
+			return fmt.Errorf("Nat64UdpTimeout must not be less than 120 seconds")
 		}
 	}
 

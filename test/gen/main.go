@@ -130,7 +130,7 @@ func main() {
 		merged["AllowedSources"] = splitCSV(*allowedSources)
 		merged["Nat64Enable"] = *nat64Enable
 		merged["Nat64Pool"] = pool6CIDR
-		merged["Nat64UdpTimeout"] = 30
+		merged["Nat64UdpTimeout"] = 300
 		merged["Dns64Enable"] = *dns64Enable
 		merged["Dns64Listen"] = dns64Listen
 		merged["Dns64Default"] = *dns64Default

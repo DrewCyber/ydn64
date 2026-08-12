@@ -203,7 +203,7 @@ func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string, peers, allowed
 	sb.WriteString(fmt.Sprintf("  Nat64Pool: %q\n\n", pool6CIDR))
 
 	sb.WriteString("  # Idle timeout in seconds before a UDP NAT64 session is expired.\n")
-	sb.WriteString("  Nat64UdpTimeout: 30\n\n")
+	sb.WriteString("  Nat64UdpTimeout: 300\n\n")
 
 	sb.WriteString("  # Enable DNS64 service. If false, the DNS64 service will not be started.\n")
 	sb.WriteString("  Dns64Enable: true\n\n")

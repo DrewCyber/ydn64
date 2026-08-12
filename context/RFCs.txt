@@ -32,7 +32,7 @@ RFC 6146 — Stateful NAT64: Network Address and Protocol Translation from
       - §3.5 / §5.4  drop inbound IPv6 with a source inside Pref64::/n [DONE]
       - §3.4         fragment handling                                 [TODO]
       - §3.5.1 / §4  UDP session lifetime floor (UDP_MIN = 2 min,
-                     UDP_DEFAULT = 5 min); ydn64 defaults to 30 s      [TODO]
+                     UDP_DEFAULT = 5 min); ydn64 defaults to 30 s      [DONE]
       - §3.5.3 / §4  ICMP session lifetime (ICMP_DEFAULT = 60 s) and
                      NAT-allocated ICMP Identifier                     [TODO]
       - §5.3         resource limits / anti-DoS protection             [TODO]
