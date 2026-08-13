@@ -32,6 +32,9 @@ func buildIPv6UDPPacket(srcIP, dstIP []byte, srcPort, dstPort uint16, payload []
 
 	// ── UDP checksum over IPv6 pseudo-header (mandatory per RFC 2460) ─────────
 	cs := ipv6UpperLayerChecksum(pkt[8:24], pkt[24:40], 17, pkt[40:40+udpLen])
+	if cs == 0 {
+		cs = 0xFFFF
+	}
 	binary.BigEndian.PutUint16(pkt[46:48], cs)
 
 	return pkt

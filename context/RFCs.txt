@@ -79,7 +79,7 @@ RFC 7915 — IP/ICMP Translation Algorithm                               [N/A]
 RFC 8200 — Internet Protocol, Version 6 (IPv6) Specification       [PARTIAL]
     §8.1 upper-layer checksums over the IPv6 pseudo-header. Construction
     is correct; the "a computed checksum of zero MUST be transmitted as
-    0xFFFF" rule for UDP is missing.                                  [TODO]
+    0xFFFF" rule for UDP is missing.                                  [DONE]
     §4 extension-header chain walking is also absent — ydn64 reads only
     the fixed header's Next Header byte.                              [TODO]
 
