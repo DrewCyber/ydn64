@@ -41,6 +41,10 @@ func (s *Service) handleTCP(req *tcp.ForwarderRequest, logger *log.Logger) {
 
 	// Extract embedded IPv4 from the last 4 bytes of the pool6 destination.
 	ipv4 := net.IP(dstSlice[12:16])
+	if s.isIgnoredDst(ipv4) {
+		req.Complete(true)
+		return
+	}
 	dstAddr := net.JoinHostPort(ipv4.String(), strconv.Itoa(int(id.LocalPort)))
 
 	// CreateEndpoint completes the three-way handshake synchronously.

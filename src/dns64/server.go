@@ -34,7 +34,7 @@ type Service struct {
 }
 
 // NewService creates a DNS64 Service from configuration.
-func NewService(cfg config.DNS64Config, allowedSources []string, ns *netstack.YggdrasilNetstack) (*Service, error) {
+func NewService(cfg config.DNS64Config, allowedSources []string, ignoredDstSubnets []string, ns *netstack.YggdrasilNetstack) (*Service, error) {
 	ia, err := parseIA(cfg.InvalidAddress)
 	if err != nil {
 		return nil, fmt.Errorf("dns64: %w", err)
@@ -47,7 +47,7 @@ func NewService(cfg config.DNS64Config, allowedSources []string, ns *netstack.Yg
 		cache: newCache(expDur, purgeDur),
 		ns:    ns,
 	}
-	p.reload(cfg.Default, ia, buildZones(cfg.Zones))
+	p.reload(cfg.Default, ia, buildZones(cfg.Zones), config.ParseIPNets(ignoredDstSubnets))
 
 	allowed := config.ParseAllowedNets(allowedSources)
 	s := &Service{
@@ -59,19 +59,19 @@ func NewService(cfg config.DNS64Config, allowedSources []string, ns *netstack.Yg
 	return s, nil
 }
 
-// Reload atomically replaces AllowedSources, the DNS64 zone table/default
+// Reload atomically replaces AllowedSources, IgnoredDstSubnets, the DNS64 zone table/default
 // forwarder/InvalidAddress policy, and the cache's expiration/purge
 // intervals, e.g. in response to a SIGHUP-triggered config reload. Safe to
 // call concurrently with in-flight queries. Dns64Listen and Dns64Enable are
 // not reloadable and require a process restart to change.
-func (s *Service) Reload(cfg config.DNS64Config, allowedSources []string) error {
+func (s *Service) Reload(cfg config.DNS64Config, allowedSources []string, ignoredDstSubnets []string) error {
 	ia, err := parseIA(cfg.InvalidAddress)
 	if err != nil {
 		return fmt.Errorf("dns64: %w", err)
 	}
 	allowed := config.ParseAllowedNets(allowedSources)
 	s.allowedNets.Store(&allowed)
-	s.proxy.reload(cfg.Default, ia, buildZones(cfg.Zones))
+	s.proxy.reload(cfg.Default, ia, buildZones(cfg.Zones), config.ParseIPNets(ignoredDstSubnets))
 	s.proxy.cache.Reload(time.Duration(cfg.CacheExp)*time.Second, time.Duration(cfg.CachePurge)*time.Second)
 	return nil
 }

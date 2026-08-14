@@ -38,14 +38,30 @@ type NAT64Config struct {
 	UDPTimeout int
 }
 
+// DefaultIgnoredDstSubnets contains the default IPv4 private, loopback, link-local,
+// and multicast/reserved subnets ignored by NAT64 and DNS64.
+var DefaultIgnoredDstSubnets = []string{
+	"10.0.0.0/8",
+	"172.16.0.0/12",
+	"192.168.0.0/16",
+	"127.0.0.0/8",
+	"169.254.0.0/16",
+	"100.64.0.0/10",
+	"0.0.0.0/8",
+	"224.0.0.0/4",
+	"240.0.0.0/4",
+	"255.255.255.255/32",
+}
+
 // AppConfig holds the ydn64-specific (NAT64/DNS64) settings. It is decoded
 // from the same single HJSON file (ydn64.conf) as the Yggdrasil node
-// configuration; only the ydn64-specific keys (AllowedSources, Nat64*,
-// Dns64*) are read into this struct — the Yggdrasil keys (PrivateKey, Peers,
+// configuration; only the ydn64-specific keys (AllowedSources, IgnoredDstSubnets,
+// Nat64*, Dns64*) are read into this struct — the Yggdrasil keys (PrivateKey, Peers,
 // Listen, ...) are parsed separately into a ygconfig.NodeConfig and are
 // simply ignored here.
 type AppConfig struct {
 	AllowedSources       []string     `json:"AllowedSources"`
+	IgnoredDstSubnets    []string     `json:"IgnoredDstSubnets"`
 	Nat64Enable          bool         `json:"Nat64Enable"`
 	Nat64Pool            string       `json:"Nat64Pool"`
 	Nat64UdpTimeout      int          `json:"Nat64UdpTimeout"`
@@ -77,20 +93,30 @@ func (c *AppConfig) ApplyPrivateKeyOverride(nodeIP, pool6CIDR, pool6Prefix strin
 	}
 }
 
-// ParseAllowedNets converts AllowedSources config entries (bare IPs or
-// CIDRs) into a slice of *net.IPNet, as consumed by nat64.Service and
-// dns64.Service's isAllowed() checks. Invalid entries are silently skipped —
-// AppConfig.Validate() is responsible for rejecting them at load time.
-func ParseAllowedNets(sources []string) []*net.IPNet {
+// ParseIPNets converts config entries (bare IPs or CIDRs) into a slice of *net.IPNet.
+// Invalid entries are silently skipped — AppConfig.Validate() is responsible
+// for rejecting them at load time.
+func ParseIPNets(entries []string) []*net.IPNet {
 	var out []*net.IPNet
-	for _, src := range sources {
-		if ip := net.ParseIP(src); ip != nil {
-			out = append(out, &net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)})
-		} else if _, cidr, err := net.ParseCIDR(src); err == nil {
+	for _, entry := range entries {
+		if ip := net.ParseIP(entry); ip != nil {
+			if ip4 := ip.To4(); ip4 != nil {
+				out = append(out, &net.IPNet{IP: ip4, Mask: net.CIDRMask(32, 32)})
+			} else {
+				out = append(out, &net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)})
+			}
+		} else if _, cidr, err := net.ParseCIDR(entry); err == nil {
 			out = append(out, cidr)
 		}
 	}
 	return out
+}
+
+// ParseAllowedNets converts AllowedSources config entries (bare IPs or
+// CIDRs) into a slice of *net.IPNet, as consumed by nat64.Service and
+// dns64.Service's isAllowed() checks.
+func ParseAllowedNets(sources []string) []*net.IPNet {
+	return ParseIPNets(sources)
 }
 
 // NAT64 returns the NAT64Config view of the merged configuration.
@@ -145,6 +171,18 @@ func (c *AppConfig) Validate() error {
 		if _, _, err := net.ParseCIDR(src); err != nil {
 			if net.ParseIP(src) == nil {
 				return fmt.Errorf("AllowedSources: invalid entry %q", src)
+			}
+		}
+	}
+
+	if c.IgnoredDstSubnets == nil {
+		c.IgnoredDstSubnets = append([]string(nil), DefaultIgnoredDstSubnets...)
+	}
+
+	for _, dst := range c.IgnoredDstSubnets {
+		if _, _, err := net.ParseCIDR(dst); err != nil {
+			if net.ParseIP(dst) == nil {
+				return fmt.Errorf("IgnoredDstSubnets: invalid entry %q", dst)
 			}
 		}
 	}

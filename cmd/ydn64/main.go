@@ -281,7 +281,7 @@ func main() {
 
 	var nat64Svc *nat64.Service
 	if nat64Cfg.Enable {
-		nat64Svc, err = nat64.NewService(nat64Cfg, appCfg.AllowedSources, ns)
+		nat64Svc, err = nat64.NewService(nat64Cfg, appCfg.AllowedSources, appCfg.IgnoredDstSubnets, ns)
 		if err != nil {
 			logger.Fatalf("failed to create NAT64 service: %v", err)
 		}
@@ -292,7 +292,7 @@ func main() {
 
 	var dns64Svc *dns64.Service
 	if dns64Cfg.Enable {
-		dns64Svc, err = dns64.NewService(dns64Cfg, appCfg.AllowedSources, ns)
+		dns64Svc, err = dns64.NewService(dns64Cfg, appCfg.AllowedSources, appCfg.IgnoredDstSubnets, ns)
 		if err != nil {
 			logger.Fatalf("failed to create DNS64 service: %v", err)
 		}
@@ -387,10 +387,10 @@ func reloadConfig(
 	}
 
 	if nat64Svc != nil {
-		nat64Svc.Reload(newNat64Cfg, appCfg.AllowedSources)
+		nat64Svc.Reload(newNat64Cfg, appCfg.AllowedSources, appCfg.IgnoredDstSubnets)
 	}
 	if dns64Svc != nil {
-		if err := dns64Svc.Reload(newDNS64Cfg, appCfg.AllowedSources); err != nil {
+		if err := dns64Svc.Reload(newDNS64Cfg, appCfg.AllowedSources, appCfg.IgnoredDstSubnets); err != nil {
 			logger.Warnf("DNS64 config reload failed: %v", err)
 			return
 		}

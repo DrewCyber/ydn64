@@ -55,9 +55,10 @@ func DeriveFromPrivateKey(privKey ed25519.PrivateKey) (nodeIP string, pool6CIDR 
 // container started with all three variables set produce a fully
 // pre-configured config file via `-genconf` with no further editing.
 type GenerateOverrides struct {
-	PrivateKeyHex  string   // hex-encoded ed25519 private key; empty = generate a new random key
-	Peers          []string // empty = no peers (Peers: [])
-	AllowedSources []string // empty = placeholder example entry
+	PrivateKeyHex     string   // hex-encoded ed25519 private key; empty = generate a new random key
+	Peers             []string // empty = no peers (Peers: [])
+	AllowedSources    []string // empty = placeholder example entry
+	IgnoredDstSubnets []string // empty = default ignored subnets
 }
 
 // Generate returns a freshly generated, single merged ydn64.conf HJSON
@@ -81,7 +82,12 @@ func Generate(overrides GenerateOverrides) (string, error) {
 	nodeIP, pool6CIDR, pool6Prefix := DeriveFromPrivateKey(privKey)
 	privKeyHex := hex.EncodeToString(privKey)
 
-	return buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix, overrides.Peers, overrides.AllowedSources), nil
+	ignored := overrides.IgnoredDstSubnets
+	if len(ignored) == 0 {
+		ignored = DefaultIgnoredDstSubnets
+	}
+
+	return buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix, overrides.Peers, overrides.AllowedSources, ignored), nil
 }
 
 // formatPeersHJSON renders the Peers list the same way as the hand-written
@@ -113,7 +119,20 @@ func formatAllowedSourcesHJSON(sources []string) string {
 	return "[" + strings.Join(quoted, ", ") + "]"
 }
 
-func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string, peers, allowedSources []string) string {
+func formatIgnoredDstSubnetsHJSON(subnets []string) string {
+	if len(subnets) == 0 {
+		return "[]"
+	}
+	var b strings.Builder
+	b.WriteString("[\n")
+	for _, s := range subnets {
+		b.WriteString(fmt.Sprintf("    %q\n", s))
+	}
+	b.WriteString("  ]")
+	return b.String()
+}
+
+func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string, peers, allowedSources, ignoredDstSubnets []string) string {
 	var sb strings.Builder
 
 	sb.WriteString("{\n")
@@ -194,6 +213,10 @@ func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string, peers, allowed
 	sb.WriteString("  # CIDR notation or individual IPv6 addresses.\n")
 	sb.WriteString("  # AllowedSources: [\"200::/7\"]\n")
 	sb.WriteString(fmt.Sprintf("  AllowedSources: %s\n\n", formatAllowedSourcesHJSON(allowedSources)))
+
+	sb.WriteString("  # List of IPv4 subnets that will be ignored (not NATed or synthesised).\n")
+	sb.WriteString("  # To allow NAT for specific subnets, remove them from this list.\n")
+	sb.WriteString(fmt.Sprintf("  IgnoredDstSubnets: %s\n\n", formatIgnoredDstSubnetsHJSON(ignoredDstSubnets)))
 
 	sb.WriteString("  # Enable NAT64 service. If false, the NAT64 service will not be started.\n")
 	sb.WriteString("  Nat64Enable: true\n\n")

@@ -16,12 +16,13 @@ import (
 )
 
 // proxyConfig holds the reloadable subset of DNS64 behaviour (Dns64Default,
-// Dns64Zones, Dns64InvalidAddress). It is swapped atomically by
+// Dns64Zones, Dns64InvalidAddress, IgnoredDstSubnets). It is swapped atomically by
 // proxy.reload() so query-handling goroutines never need to take a lock.
 type proxyConfig struct {
 	zones          []zone
 	defaultForward string
 	ia             InvalidAddress
+	ignoredDstNets []*net.IPNet
 }
 
 // proxy implements the DNS64 translation logic.
@@ -31,10 +32,24 @@ type proxy struct {
 	ns    *netstack.YggdrasilNetstack // used to dial Yggdrasil-native (200::/7) forwarders
 }
 
-// reload atomically replaces the zone table, default forwarder, and
-// InvalidAddress policy. Safe to call concurrently with in-flight queries.
-func (p *proxy) reload(defaultForward string, ia InvalidAddress, zones []zone) {
-	p.cfg.Store(&proxyConfig{zones: zones, defaultForward: defaultForward, ia: ia})
+// reload atomically replaces the zone table, default forwarder,
+// InvalidAddress policy, and ignored destination subnets. Safe to call concurrently with in-flight queries.
+func (p *proxy) reload(defaultForward string, ia InvalidAddress, zones []zone, ignoredDstNets []*net.IPNet) {
+	p.cfg.Store(&proxyConfig{zones: zones, defaultForward: defaultForward, ia: ia, ignoredDstNets: ignoredDstNets})
+}
+
+// isIgnoredDst reports whether dstIPv4 is in one of the configured ignored destination subnets.
+func (p *proxy) isIgnoredDst(ip net.IP) bool {
+	cfg := p.cfg.Load()
+	if cfg == nil {
+		return false
+	}
+	for _, n := range cfg.ignoredDstNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // yggdrasilRange is the Yggdrasil node address space (200::/7). Forwarders
@@ -409,6 +424,10 @@ func (p *proxy) synthesiseFromA(rrs []dns.RR, fallbackName string, z *zone, maxT
 				out = append(out, rr)
 				continue
 			}
+		}
+
+		if p.isIgnoredDst(ipv4) {
+			continue
 		}
 
 		synth := makeSynthesisedAAAA(z.prefix, ipv4)
