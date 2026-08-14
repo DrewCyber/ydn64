@@ -44,13 +44,15 @@ type Service struct {
 // touching the gVisor stack/pool6 routing (AllowedSources, Nat64UdpTimeout).
 // It is swapped atomically so readers never need to take a lock.
 type nat64Settings struct {
-	allowedNets []*net.IPNet
-	udpTimeout  time.Duration
+	allowedNets    []*net.IPNet
+	ignoredDstNets []*net.IPNet
+	udpTimeout     time.Duration
 }
 
 // NewService creates a NAT64 Service from configuration.
 // allowedSources is the shared AllowedSources list from AppConfig.
-func NewService(cfg config.NAT64Config, allowedSources []string, ns *netstack.YggdrasilNetstack) (*Service, error) {
+// ignoredDstSubnets is the shared IgnoredDstSubnets list from AppConfig.
+func NewService(cfg config.NAT64Config, allowedSources []string, ignoredDstSubnets []string, ns *netstack.YggdrasilNetstack) (*Service, error) {
 	_, pool6Net, err := net.ParseCIDR(cfg.Pool6)
 	if err != nil {
 		return nil, fmt.Errorf("nat64: invalid pool6 %q: %w", cfg.Pool6, err)
@@ -61,20 +63,22 @@ func NewService(cfg config.NAT64Config, allowedSources []string, ns *netstack.Yg
 		ns:       ns,
 	}
 	s.settings.Store(&nat64Settings{
-		allowedNets: config.ParseAllowedNets(allowedSources),
-		udpTimeout:  time.Duration(cfg.UDPTimeout) * time.Second,
+		allowedNets:    config.ParseAllowedNets(allowedSources),
+		ignoredDstNets: config.ParseIPNets(ignoredDstSubnets),
+		udpTimeout:     time.Duration(cfg.UDPTimeout) * time.Second,
 	})
 	return s, nil
 }
 
-// Reload atomically replaces AllowedSources and Nat64UdpTimeout with new
-// values, e.g. in response to a SIGHUP-triggered config reload. Safe to call
+// Reload atomically replaces AllowedSources, IgnoredDstSubnets, and Nat64UdpTimeout
+// with new values, e.g. in response to a SIGHUP-triggered config reload. Safe to call
 // concurrently with in-flight traffic; other NAT64 settings (Nat64Pool,
 // Nat64Enable) are not reloadable and require a process restart to change.
-func (s *Service) Reload(cfg config.NAT64Config, allowedSources []string) {
+func (s *Service) Reload(cfg config.NAT64Config, allowedSources []string, ignoredDstSubnets []string) {
 	s.settings.Store(&nat64Settings{
-		allowedNets: config.ParseAllowedNets(allowedSources),
-		udpTimeout:  time.Duration(cfg.UDPTimeout) * time.Second,
+		allowedNets:    config.ParseAllowedNets(allowedSources),
+		ignoredDstNets: config.ParseIPNets(ignoredDstSubnets),
+		udpTimeout:     time.Duration(cfg.UDPTimeout) * time.Second,
 	})
 }
 
@@ -87,6 +91,16 @@ func (s *Service) udpTimeout() time.Duration {
 // An empty allowedNets list means "deny all".
 func (s *Service) isAllowed(ip net.IP) bool {
 	for _, n := range s.settings.Load().allowedNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// isIgnoredDst reports whether dstIPv4 is in one of the configured ignored destination subnets.
+func (s *Service) isIgnoredDst(ip net.IP) bool {
+	for _, n := range s.settings.Load().ignoredDstNets {
 		if n.Contains(ip) {
 			return true
 		}

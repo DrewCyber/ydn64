@@ -68,6 +68,9 @@ func (s *Service) interceptUDPPacket(pkt []byte) bool {
 
 	var dstIPv4 [4]byte
 	copy(dstIPv4[:], pkt[36:40]) // last 4 bytes of pool6 destination = embedded IPv4
+	if s.isIgnoredDst(net.IP(dstIPv4[:])) {
+		return true // consumed (dropped)
+	}
 
 	payload := make([]byte, len(pkt)-48)
 	copy(payload, pkt[48:])

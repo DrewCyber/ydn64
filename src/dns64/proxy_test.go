@@ -7,8 +7,111 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DrewCyber/ydn64/src/config"
 	"github.com/miekg/dns"
 )
+
+func TestDNS64IgnoredDstSubnets(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen UDP: %v", err)
+	}
+	defer pc.Close()
+
+	serverAddr := pc.LocalAddr().String()
+
+	dnsServer := &dns.Server{
+		PacketConn: pc,
+		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+			if len(req.Question) == 0 {
+				w.WriteMsg(resp)
+				return
+			}
+			q := req.Question[0]
+			name := strings.ToLower(q.Name)
+
+			switch name {
+			case "public.example.com.":
+				if q.Qtype == dns.TypeA {
+					rr, _ := dns.NewRR("public.example.com. 300 IN A 1.1.1.1")
+					resp.Answer = append(resp.Answer, rr)
+				}
+			case "private.example.com.":
+				if q.Qtype == dns.TypeA {
+					rr, _ := dns.NewRR("private.example.com. 300 IN A 10.0.0.1")
+					resp.Answer = append(resp.Answer, rr)
+				}
+			case "loopback.example.com.":
+				if q.Qtype == dns.TypeA {
+					rr, _ := dns.NewRR("loopback.example.com. 300 IN A 127.0.0.1")
+					resp.Answer = append(resp.Answer, rr)
+				}
+			}
+			w.WriteMsg(resp)
+		}),
+	}
+
+	go func() {
+		_ = dnsServer.ActivateAndServe()
+	}()
+	defer dnsServer.Shutdown()
+
+	time.Sleep(50 * time.Millisecond)
+
+	p := &proxy{
+		cache: newCache(300*time.Second, 600*time.Second),
+	}
+
+	prefix := net.ParseIP("64:ff9b::")
+	ignoredNets := config.ParseIPNets([]string{"10.0.0.0/8", "127.0.0.0/8"})
+
+	p.reload(serverAddr, IAIgnore, []zone{
+		{
+			domains:             []string{"."},
+			prefix:              prefix,
+			returnIPv4Addresses: false,
+			returnIPv6Addresses: false,
+		},
+	}, ignoredNets)
+
+	// Test public IP synthesis -> should succeed
+	{
+		req := new(dns.Msg)
+		req.SetQuestion("public.example.com.", dns.TypeAAAA)
+		resp := p.handle(req)
+		if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 1 {
+			t.Fatalf("expected 1 synthetic AAAA answer for public IP, got rcode %d, len %d", resp.Rcode, len(resp.Answer))
+		}
+	}
+
+	// Test private IP synthesis (10.0.0.1) -> should be filtered out (0 answers)
+	{
+		req := new(dns.Msg)
+		req.SetQuestion("private.example.com.", dns.TypeAAAA)
+		resp := p.handle(req)
+		if resp.Rcode != dns.RcodeSuccess {
+			t.Fatalf("expected RcodeSuccess, got %d", resp.Rcode)
+		}
+		if len(resp.Answer) != 0 {
+			t.Errorf("expected 0 answers for private IP 10.0.0.1, got %d", len(resp.Answer))
+		}
+	}
+
+	// Test loopback IP synthesis (127.0.0.1) -> should be filtered out (0 answers)
+	{
+		req := new(dns.Msg)
+		req.SetQuestion("loopback.example.com.", dns.TypeAAAA)
+		resp := p.handle(req)
+		if resp.Rcode != dns.RcodeSuccess {
+			t.Fatalf("expected RcodeSuccess, got %d", resp.Rcode)
+		}
+		if len(resp.Answer) != 0 {
+			t.Errorf("expected 0 answers for loopback IP 127.0.0.1, got %d", len(resp.Answer))
+		}
+	}
+}
 
 func TestDNS64ErrorRcodeHandling(t *testing.T) {
 	// 1. Start a mock DNS server on a random port.
@@ -79,7 +182,7 @@ func TestDNS64ErrorRcodeHandling(t *testing.T) {
 			returnIPv4Addresses: false,
 			returnIPv6Addresses: false,
 		},
-	})
+	}, nil)
 
 	// 3. Test Cases.
 	tests := []struct {
@@ -166,7 +269,7 @@ func TestIPv4OnlyARPALocalAnswering(t *testing.T) {
 			returnIPv4Addresses: false,
 			returnIPv6Addresses: false,
 		},
-	})
+	}, nil)
 
 	// Test case 1: AAAA query on catch-all zone with prefix
 	{
@@ -232,7 +335,7 @@ func TestIPv4OnlyARPALocalAnswering(t *testing.T) {
 			returnIPv4Addresses: false,
 			returnIPv6Addresses: false,
 		},
-	})
+	}, nil)
 
 	{
 		req := new(dns.Msg)
@@ -344,7 +447,7 @@ func TestDNS64NonINQClassAndSyntheticTTL(t *testing.T) {
 			returnIPv4Addresses: false,
 			returnIPv6Addresses: false,
 		},
-	})
+	}, nil)
 
 	// Test 1: non-IN Qclass pass-through
 	t.Run("Non-IN Qclass pass-through", func(t *testing.T) {
@@ -483,7 +586,7 @@ func TestDNS64CNAMEChainPreservationAndOwnerName(t *testing.T) {
 			returnIPv4Addresses: false,
 			returnIPv6Addresses: false,
 		},
-	})
+	}, nil)
 
 	req := new(dns.Msg)
 	req.SetQuestion("alias.example.com.", dns.TypeAAAA)
