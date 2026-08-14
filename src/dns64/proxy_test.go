@@ -247,3 +247,178 @@ func TestIPv4OnlyARPALocalAnswering(t *testing.T) {
 		}
 	}
 }
+
+func TestDNS64NonINQClassAndSyntheticTTL(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen UDP: %v", err)
+	}
+	defer pc.Close()
+
+	serverAddr := pc.LocalAddr().String()
+
+	dnsServer := &dns.Server{
+		PacketConn: pc,
+		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+			if len(req.Question) == 0 {
+				w.WriteMsg(resp)
+				return
+			}
+			q := req.Question[0]
+			name := strings.ToLower(q.Name)
+
+			// Handle non-IN qclass pass-through mock answer
+			if q.Qclass == dns.ClassCHAOS {
+				rr, _ := dns.NewRR(fmt.Sprintf("%s 100 CH TXT \"chaos-data\"", q.Name))
+				if rr != nil {
+					resp.Answer = append(resp.Answer, rr)
+				}
+				w.WriteMsg(resp)
+				return
+			}
+
+			switch name {
+			case "soa120.example.com.":
+				if q.Qtype == dns.TypeAAAA {
+					resp.SetRcode(req, dns.RcodeSuccess)
+					soaRR, _ := dns.NewRR("soa120.example.com. 120 IN SOA ns1.example.com. admin.example.com. 1 7200 3600 1209600 3600")
+					if soaRR != nil {
+						resp.Ns = append(resp.Ns, soaRR)
+					}
+				} else if q.Qtype == dns.TypeA {
+					resp.SetRcode(req, dns.RcodeSuccess)
+					aRR, _ := dns.NewRR("soa120.example.com. 300 IN A 1.1.1.1")
+					if aRR != nil {
+						resp.Answer = append(resp.Answer, aRR)
+					}
+				}
+			case "soa900.example.com.":
+				if q.Qtype == dns.TypeAAAA {
+					resp.SetRcode(req, dns.RcodeSuccess)
+					soaRR, _ := dns.NewRR("soa900.example.com. 900 IN SOA ns1.example.com. admin.example.com. 1 7200 3600 1209600 3600")
+					if soaRR != nil {
+						resp.Ns = append(resp.Ns, soaRR)
+					}
+				} else if q.Qtype == dns.TypeA {
+					resp.SetRcode(req, dns.RcodeSuccess)
+					aRR, _ := dns.NewRR("soa900.example.com. 300 IN A 1.1.1.2")
+					if aRR != nil {
+						resp.Answer = append(resp.Answer, aRR)
+					}
+				}
+			case "nosoa1200.example.com.":
+				if q.Qtype == dns.TypeAAAA {
+					resp.SetRcode(req, dns.RcodeSuccess) // No SOA in Ns section
+				} else if q.Qtype == dns.TypeA {
+					resp.SetRcode(req, dns.RcodeSuccess)
+					aRR, _ := dns.NewRR("nosoa1200.example.com. 1200 IN A 1.1.1.3")
+					if aRR != nil {
+						resp.Answer = append(resp.Answer, aRR)
+					}
+				}
+			default:
+				resp.SetRcode(req, dns.RcodeNameError)
+			}
+			w.WriteMsg(resp)
+		}),
+	}
+
+	go func() {
+		_ = dnsServer.ActivateAndServe()
+	}()
+	defer dnsServer.Shutdown()
+
+	time.Sleep(50 * time.Millisecond)
+
+	p := &proxy{
+		cache: newCache(300*time.Second, 600*time.Second),
+	}
+
+	prefix := net.ParseIP("64:ff9b::")
+	p.reload(serverAddr, IAIgnore, []zone{
+		{
+			domains:             []string{"."},
+			prefix:              prefix,
+			returnIPv4Addresses: false,
+			returnIPv6Addresses: false,
+		},
+	})
+
+	// Test 1: non-IN Qclass pass-through
+	t.Run("Non-IN Qclass pass-through", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("version.bind.", dns.TypeTXT)
+		req.Question[0].Qclass = dns.ClassCHAOS
+		resp := p.handle(req)
+
+		if resp.Rcode != dns.RcodeSuccess {
+			t.Fatalf("expected RcodeSuccess, got %d", resp.Rcode)
+		}
+		if len(resp.Answer) != 1 {
+			t.Fatalf("expected 1 answer, got %d", len(resp.Answer))
+		}
+		txt, ok := resp.Answer[0].(*dns.TXT)
+		if !ok {
+			t.Fatalf("expected TXT record, got %T", resp.Answer[0])
+		}
+		if len(txt.Txt) == 0 || txt.Txt[0] != "chaos-data" {
+			t.Errorf("expected TXT 'chaos-data', got %v", txt.Txt)
+		}
+	})
+
+	// Test 2: Synthetic AAAA TTL = min(A TTL 300, SOA TTL 120) -> 120
+	t.Run("Synthetic TTL capped by SOA TTL", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("soa120.example.com.", dns.TypeAAAA)
+		resp := p.handle(req)
+
+		if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 1 {
+			t.Fatalf("expected success with 1 answer, got rcode %d, len %d", resp.Rcode, len(resp.Answer))
+		}
+		aaaa, ok := resp.Answer[0].(*dns.AAAA)
+		if !ok {
+			t.Fatalf("expected AAAA record, got %T", resp.Answer[0])
+		}
+		if aaaa.Header().Ttl != 120 {
+			t.Errorf("expected TTL 120, got %d", aaaa.Header().Ttl)
+		}
+	})
+
+	// Test 3: Synthetic AAAA TTL = min(A TTL 300, SOA TTL 900) -> 300
+	t.Run("Synthetic TTL capped by A TTL", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("soa900.example.com.", dns.TypeAAAA)
+		resp := p.handle(req)
+
+		if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 1 {
+			t.Fatalf("expected success with 1 answer, got rcode %d, len %d", resp.Rcode, len(resp.Answer))
+		}
+		aaaa, ok := resp.Answer[0].(*dns.AAAA)
+		if !ok {
+			t.Fatalf("expected AAAA record, got %T", resp.Answer[0])
+		}
+		if aaaa.Header().Ttl != 300 {
+			t.Errorf("expected TTL 300, got %d", aaaa.Header().Ttl)
+		}
+	})
+
+	// Test 4: Synthetic AAAA TTL = min(A TTL 1200, fallback 600) -> 600 when no SOA present
+	t.Run("Synthetic TTL capped by 600s fallback when no SOA", func(t *testing.T) {
+		req := new(dns.Msg)
+		req.SetQuestion("nosoa1200.example.com.", dns.TypeAAAA)
+		resp := p.handle(req)
+
+		if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 1 {
+			t.Fatalf("expected success with 1 answer, got rcode %d, len %d", resp.Rcode, len(resp.Answer))
+		}
+		aaaa, ok := resp.Answer[0].(*dns.AAAA)
+		if !ok {
+			t.Fatalf("expected AAAA record, got %T", resp.Answer[0])
+		}
+		if aaaa.Header().Ttl != 600 {
+			t.Errorf("expected TTL 600, got %d", aaaa.Header().Ttl)
+		}
+	})
+}

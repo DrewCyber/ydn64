@@ -133,33 +133,37 @@ func (p *proxy) handle(req *dns.Msg) *dns.Msg {
 	var resp *dns.Msg
 	var err error
 
-	switch q.Qtype {
-	case dns.TypeAAAA:
-		resp, err = p.handleAAAA(req, &q, z, server)
-	case dns.TypeANY:
-		// ydn64 only ever serves IPv6-only clients, so a raw ANY answer
-		// containing real A records would be unusable to them anyway.
-		// Reuse the AAAA synthesis/filter path (respecting the zone's
-		// return-ipv4-addresses/return-ipv6-addresses/prefix rules)
-		// instead of blindly passing through whatever the upstream
-		// resolver returns for ANY (which varies wildly — some upstreams
-		// apply RFC 8482 and reply with a bare HINFO record). The upstream
-		// query itself must ask for AAAA, not ANY — handleAAAA uses q's
-		// Qtype verbatim when building its upstream query, so an
-		// unmodified ANY question here would leak straight through as an
-		// upstream ANY query instead of triggering real AAAA synthesis.
-		aaaaQ := q
-		aaaaQ.Qtype = dns.TypeAAAA
-		resp, err = p.handleAAAA(req, &aaaaQ, z, server)
-		if resp != nil {
-			resp.Question[0].Qtype = dns.TypeANY
-		}
-	case dns.TypeA:
-		resp, err = p.handleA(req, &q, z, server)
-	case dns.TypePTR:
-		resp, err = p.handlePTR(req, &q, z, server)
-	default:
+	if q.Qclass != dns.ClassINET {
 		resp, err = p.passThrough(req, server)
+	} else {
+		switch q.Qtype {
+		case dns.TypeAAAA:
+			resp, err = p.handleAAAA(req, &q, z, server)
+		case dns.TypeANY:
+			// ydn64 only ever serves IPv6-only clients, so a raw ANY answer
+			// containing real A records would be unusable to them anyway.
+			// Reuse the AAAA synthesis/filter path (respecting the zone's
+			// return-ipv4-addresses/return-ipv6-addresses/prefix rules)
+			// instead of blindly passing through whatever the upstream
+			// resolver returns for ANY (which varies wildly — some upstreams
+			// apply RFC 8482 and reply with a bare HINFO record). The upstream
+			// query itself must ask for AAAA, not ANY — handleAAAA uses q's
+			// Qtype verbatim when building its upstream query, so an
+			// unmodified ANY question here would leak straight through as an
+			// upstream ANY query instead of triggering real AAAA synthesis.
+			aaaaQ := q
+			aaaaQ.Qtype = dns.TypeAAAA
+			resp, err = p.handleAAAA(req, &aaaaQ, z, server)
+			if resp != nil {
+				resp.Question[0].Qtype = dns.TypeANY
+			}
+		case dns.TypeA:
+			resp, err = p.handleA(req, &q, z, server)
+		case dns.TypePTR:
+			resp, err = p.handlePTR(req, &q, z, server)
+		default:
+			resp, err = p.passThrough(req, server)
+		}
 	}
 
 	if err != nil || resp == nil {
@@ -264,7 +268,20 @@ func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string
 		return nil, err
 	}
 
-	answer = p.synthesiseFromA(aResp.Answer, q.Name, z)
+	// RFC 6147 §5.1.7: Synthetic TTL = min(A TTL, SOA TTL from negative AAAA response).
+	// If no SOA RR was delivered with the negative response to the AAAA query,
+	// use min(A TTL, 600 seconds).
+	maxTTL := uint32(600)
+	if upResp != nil {
+		for _, rr := range upResp.Ns {
+			if soa, ok := rr.(*dns.SOA); ok {
+				maxTTL = soa.Header().Ttl
+				break
+			}
+		}
+	}
+
+	answer = p.synthesiseFromA(aResp.Answer, q.Name, z, maxTTL)
 	if len(answer) > 0 {
 		p.cache.set(q.Name, answer)
 	}
@@ -362,8 +379,8 @@ func (p *proxy) filterAAAA(rrs []dns.RR, z *zone) []dns.RR {
 }
 
 // synthesiseFromA converts A records into synthesised AAAA records using
-// zone.prefix + the embedded IPv4.
-func (p *proxy) synthesiseFromA(rrs []dns.RR, name string, z *zone) []dns.RR {
+// zone.prefix + the embedded IPv4, capping TTL at maxTTL per RFC 6147 §5.1.7.
+func (p *proxy) synthesiseFromA(rrs []dns.RR, name string, z *zone, maxTTL uint32) []dns.RR {
 	out := make([]dns.RR, 0)
 	for _, rr := range rrs {
 		a, ok := rr.(*dns.A)
@@ -371,6 +388,10 @@ func (p *proxy) synthesiseFromA(rrs []dns.RR, name string, z *zone) []dns.RR {
 			continue
 		}
 		ipv4 := a.A
+		ttl := a.Header().Ttl
+		if ttl > maxTTL {
+			ttl = maxTTL
+		}
 
 		if ipv4.IsUnspecified() {
 			switch p.cfg.Load().ia {
@@ -380,14 +401,14 @@ func (p *proxy) synthesiseFromA(rrs []dns.RR, name string, z *zone) []dns.RR {
 				// treat 0.0.0.0 like a normal address → synthesise pool6::0.0.0.0
 			case IAProcess:
 				// 0.0.0.0 → translate to [::]
-				rr, _ := dns.NewRR(fmt.Sprintf("%s IN AAAA ::", name))
+				rr, _ := dns.NewRR(fmt.Sprintf("%s %d IN AAAA ::", name, ttl))
 				out = append(out, rr)
 				continue
 			}
 		}
 
 		synth := makeSynthesisedAAAA(z.prefix, ipv4)
-		rr, _ := dns.NewRR(fmt.Sprintf("%s IN AAAA %s", name, synth.String()))
+		rr, _ := dns.NewRR(fmt.Sprintf("%s %d IN AAAA %s", name, ttl, synth.String()))
 		if rr != nil {
 			out = append(out, rr)
 		}
