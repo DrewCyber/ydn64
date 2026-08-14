@@ -25,7 +25,7 @@ go build -o ./ydn64 ./cmd/ydn64      # plain build without version stamping
 ## 2. Configuration
 
 ```sh
-./ydn64 -genconf > ./tmp/ydn64.conf   # print a new config to stdout, redirect to save it
+./ydn64 -genconf > ./ydn64.conf   # print a new config to stdout, redirect to save it
 ```
 
 `-genconf` generates a complete, almost ready-to-run config — private key, NAT64
@@ -48,7 +48,7 @@ Everything else is configured with secure, working defaults out of the box.
 ## 3. Run
 
 ```sh
-./ydn64 -useconffile ./tmp/ydn64.conf # run the node + services
+./ydn64 -useconffile ./ydn64.conf # run the node + services
 ```
 
 Use node ip or config `Dns64Listen` value as DNS for yggdrasil clients:
