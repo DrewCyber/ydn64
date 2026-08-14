@@ -48,10 +48,10 @@ RFC 6147 — DNS64: DNS Extensions for NAT from IPv6 Clients to IPv4 Servers
       - §5.1.2       return the upstream NXDOMAIN instead of NOERROR   [DONE]
       - §5.1.5/5.1.7 preserve the CNAME chain; take the synthetic AAAA
                      owner name from the A record                      [TODO]
-      - §5.1.7       synthetic TTL = min(A TTL, SOA TTL)               [TODO]
+      - §5.1.7       synthetic TTL = min(A TTL, SOA TTL)               [DONE]
       - §5.1.7       per-IPv4-range prefix selection (also blocks
                      synthesis of RFC 1918 / link-local targets)       [TODO]
-      - §5.1         reject non-IN qclass                              [TODO]
+      - §5.1         pass through non-IN qclass (no synthesis)         [DONE]
       - §5.1.4       special exclusion set for AAAA                    [TODO]
       - §5.3.2/§5.4  pass through the authority + additional sections  [TODO]
       - §5.4         EDNS(0) handling and truncation / TC bit          [TODO]
