@@ -282,9 +282,6 @@ func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string
 	}
 
 	answer = p.synthesiseFromA(aResp.Answer, q.Name, z, maxTTL)
-	if len(answer) > 0 {
-		p.cache.set(q.Name, answer)
-	}
 
 	resp := new(dns.Msg)
 	req.CopyTo(resp)
@@ -312,6 +309,7 @@ func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string
 		}
 		answerWithCNAMEs = append(answerWithCNAMEs, answer...)
 		resp.Answer = answerWithCNAMEs
+		p.cache.set(q.Name, resp.Answer)
 	}
 
 	resp.Ns = aResp.Ns
@@ -380,12 +378,18 @@ func (p *proxy) filterAAAA(rrs []dns.RR, z *zone) []dns.RR {
 
 // synthesiseFromA converts A records into synthesised AAAA records using
 // zone.prefix + the embedded IPv4, capping TTL at maxTTL per RFC 6147 §5.1.7.
-func (p *proxy) synthesiseFromA(rrs []dns.RR, name string, z *zone, maxTTL uint32) []dns.RR {
+// Per RFC 6147 §5.1.5/5.1.7, the owner name of each synthetic AAAA record
+// is taken from the owner name of the corresponding target A record.
+func (p *proxy) synthesiseFromA(rrs []dns.RR, fallbackName string, z *zone, maxTTL uint32) []dns.RR {
 	out := make([]dns.RR, 0)
 	for _, rr := range rrs {
 		a, ok := rr.(*dns.A)
 		if !ok {
 			continue
+		}
+		ownerName := a.Header().Name
+		if ownerName == "" {
+			ownerName = fallbackName
 		}
 		ipv4 := a.A
 		ttl := a.Header().Ttl
@@ -401,14 +405,14 @@ func (p *proxy) synthesiseFromA(rrs []dns.RR, name string, z *zone, maxTTL uint3
 				// treat 0.0.0.0 like a normal address → synthesise pool6::0.0.0.0
 			case IAProcess:
 				// 0.0.0.0 → translate to [::]
-				rr, _ := dns.NewRR(fmt.Sprintf("%s %d IN AAAA ::", name, ttl))
+				rr, _ := dns.NewRR(fmt.Sprintf("%s %d IN AAAA ::", ownerName, ttl))
 				out = append(out, rr)
 				continue
 			}
 		}
 
 		synth := makeSynthesisedAAAA(z.prefix, ipv4)
-		rr, _ := dns.NewRR(fmt.Sprintf("%s %d IN AAAA %s", name, ttl, synth.String()))
+		rr, _ := dns.NewRR(fmt.Sprintf("%s %d IN AAAA %s", ownerName, ttl, synth.String()))
 		if rr != nil {
 			out = append(out, rr)
 		}

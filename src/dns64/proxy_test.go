@@ -422,3 +422,103 @@ func TestDNS64NonINQClassAndSyntheticTTL(t *testing.T) {
 		}
 	})
 }
+
+func TestDNS64CNAMEChainPreservationAndOwnerName(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen UDP: %v", err)
+	}
+	defer pc.Close()
+
+	serverAddr := pc.LocalAddr().String()
+
+	dnsServer := &dns.Server{
+		PacketConn: pc,
+		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+			if len(req.Question) == 0 {
+				w.WriteMsg(resp)
+				return
+			}
+			q := req.Question[0]
+			name := strings.ToLower(q.Name)
+
+			if name == "alias.example.com." {
+				if q.Qtype == dns.TypeAAAA {
+					// No AAAA record, return CNAME
+					cnameRR, _ := dns.NewRR("alias.example.com. 300 IN CNAME target.example.com.")
+					resp.Answer = append(resp.Answer, cnameRR)
+					resp.SetRcode(req, dns.RcodeSuccess)
+				} else if q.Qtype == dns.TypeA {
+					// Return CNAME chain + A record
+					cnameRR, _ := dns.NewRR("alias.example.com. 300 IN CNAME target.example.com.")
+					aRR, _ := dns.NewRR("target.example.com. 300 IN A 192.0.2.1")
+					resp.Answer = append(resp.Answer, cnameRR, aRR)
+					resp.SetRcode(req, dns.RcodeSuccess)
+				}
+			} else {
+				resp.SetRcode(req, dns.RcodeNameError)
+			}
+			w.WriteMsg(resp)
+		}),
+	}
+
+	go func() {
+		_ = dnsServer.ActivateAndServe()
+	}()
+	defer dnsServer.Shutdown()
+
+	time.Sleep(50 * time.Millisecond)
+
+	p := &proxy{
+		cache: newCache(300*time.Second, 600*time.Second),
+	}
+
+	prefix := net.ParseIP("64:ff9b::")
+	p.reload(serverAddr, IAIgnore, []zone{
+		{
+			domains:             []string{"."},
+			prefix:              prefix,
+			returnIPv4Addresses: false,
+			returnIPv6Addresses: false,
+		},
+	})
+
+	req := new(dns.Msg)
+	req.SetQuestion("alias.example.com.", dns.TypeAAAA)
+	resp := p.handle(req)
+
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("expected RcodeSuccess, got %d", resp.Rcode)
+	}
+
+	// Should preserve CNAME and synthetic AAAA record
+	if len(resp.Answer) != 2 {
+		t.Fatalf("expected 2 answers (CNAME + synthetic AAAA), got %d", len(resp.Answer))
+	}
+
+	cname, ok := resp.Answer[0].(*dns.CNAME)
+	if !ok {
+		t.Fatalf("expected answer[0] to be CNAME, got %T", resp.Answer[0])
+	}
+	if cname.Header().Name != "alias.example.com." {
+		t.Errorf("expected CNAME owner name alias.example.com., got %s", cname.Header().Name)
+	}
+	if cname.Target != "target.example.com." {
+		t.Errorf("expected CNAME target target.example.com., got %s", cname.Target)
+	}
+
+	aaaa, ok := resp.Answer[1].(*dns.AAAA)
+	if !ok {
+		t.Fatalf("expected answer[1] to be AAAA, got %T", resp.Answer[1])
+	}
+	// Per RFC 6147 §5.1.5/5.1.7: owner name of synthetic AAAA must be target.example.com.
+	if aaaa.Header().Name != "target.example.com." {
+		t.Errorf("expected synthetic AAAA owner name target.example.com., got %s", aaaa.Header().Name)
+	}
+	expectedIP := net.ParseIP("64:ff9b::192.0.2.1").String()
+	if aaaa.AAAA.String() != expectedIP {
+		t.Errorf("expected synthetic AAAA IP %s, got %s", expectedIP, aaaa.AAAA.String())
+	}
+}
