@@ -12,6 +12,44 @@ moved under the corresponding version heading.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-14
+
+RFC compliance hardening across NAT64 and DNS64.
+
+- **RFC 6147 §5.1.2** — DNS64 now returns NXDOMAIN immediately when the
+  upstream AAAA query responds with NXDOMAIN. Any other upstream error is
+  treated as an empty success and falls through to A-record-based synthesis,
+  whose result (including its own error or empty answer) becomes the final
+  response.
+- **RFC 6146 §3.5 / §5.4** — Inbound source filter: NAT64 now drops inbound
+  UDP, TCP, and ICMPv6 packets whose IPv6 source address falls within the
+  configured `Nat64Pool` prefix, preventing spoofed loopback through the
+  translator.
+- **RFC 6146 §3.5.1 / §4** — UDP session lifetime floor: `Nat64UdpTimeout`
+  is now validated to be at least 120 s; values below that (or 0 / unset)
+  are silently raised. The generated config default remains 300 s.
+- **RFC 8880** — DNS64 now answers `ipv4only.arpa.` queries locally without
+  forwarding to the upstream resolver. A queries return the two well-known
+  addresses (192.0.0.170 / 192.0.0.171); AAAA queries synthesise responses
+  using the configured zone prefix where applicable.
+- **RFC 8200 §8.1** — NAT64 now sets UDP checksum to `0xFFFF` instead of
+  `0x0000` when the computed checksum for an outbound IPv6 UDP packet would
+  otherwise be zero, as required by the spec.
+- **RFC 6147 §5.1 (Qclass / TTL)** — DNS64 passes through queries with a
+  non-IN Qclass unchanged (no synthesis). Synthetic AAAA TTL is now
+  calculated as `min(A TTL, SOA TTL)` from the upstream negative AAAA
+  response; when no SOA RR is present the fallback cap is 600 s.
+- **RFC 6147 §5.1.5 / §5.1.7 (CNAME / owner name)** — When synthesising
+  AAAA records for a CNAME-chained name, the owner name on the synthetic
+  record now matches the A record's owner name (the final CNAME target)
+  rather than the original query name, and non-A RRs (CNAMEs) are preserved
+  in the synthesised answer and cache entry.
+- **New config option `IgnoredDstSubnets`** (RFC 6147 §5.1.7) — A list of
+  IPv4 prefixes for which NAT64 and DNS64 synthesis are suppressed. Defaults
+  to RFC-defined private/reserved ranges (10/8, 172.16/12, 192.168/16,
+  127/8, 169.254/16, multicast, reserved). The list is reloadable via
+  `SIGHUP` without restart.
+
 ## [0.4.1] - 2026-07-28
 
 - Github rebuild
