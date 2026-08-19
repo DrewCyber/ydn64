@@ -19,11 +19,24 @@ import (
 	"github.com/DrewCyber/ydn64/src/netstack"
 )
 
-// dnsTCPIdleTimeout bounds how long a DNS-over-TCP connection may sit idle
-// between queries before the server closes it — the same defense against
-// resource-exhausting idle connections that mature DNS servers (BIND,
-// Unbound, etc.) apply to their own TCP listeners.
-const dnsTCPIdleTimeout = 10 * time.Second
+const (
+	// dnsTCPIdleTimeout bounds how long a DNS-over-TCP connection may sit idle
+	// between queries before the server closes it — the same defense against
+	// resource-exhausting idle connections that mature DNS servers (BIND,
+	// Unbound, etc.) apply to their own TCP listeners.
+	dnsTCPIdleTimeout = 10 * time.Second
+
+	// defaultUDPSize is the assumed UDP payload size for clients that do not
+	// send EDNS(0) OPT records. RFC 6891 §6.2.5 recommends 1232 bytes as a
+	// safe minimum that avoids fragmentation on typical paths.
+	defaultUDPSize = 1232
+
+	// maxUDPSize caps the negotiated UDP payload size even when clients
+	// advertise larger buffers — balances respecting client preferences
+	// against fragmentation risks in overlay networks. Matches BIND/Unbound
+	// defaults.
+	maxUDPSize = 4096
+)
 
 // Service is the embedded DNS64 server.
 type Service struct {
@@ -199,7 +212,31 @@ func (s *Service) serveUDP(conn *gonet.UDPConn, logger *log.Logger) {
 				logger.Debugf("DNS64: unpack error from %s: %v", from, err)
 				return
 			}
+
+			udpSize := defaultUDPSize
+			clientOPT := req.IsEdns0()
+			if clientOPT != nil {
+				clientSize := int(clientOPT.UDPSize())
+				if clientSize > maxUDPSize {
+					udpSize = maxUDPSize
+				} else if clientSize > defaultUDPSize {
+					udpSize = clientSize
+				} else if clientSize > 0 {
+					udpSize = clientSize
+				}
+			}
+
 			resp := s.proxy.handle(req)
+
+			if clientOPT != nil && resp.IsEdns0() == nil {
+				resp.SetEdns0(maxUDPSize, false)
+			}
+
+			if resp.Len() > udpSize {
+				resp.Truncate(udpSize)
+				logger.Debugf("DNS64: truncated response to %s (%d > %d bytes)", from, resp.Len(), udpSize)
+			}
+
 			out, err := resp.Pack()
 			if err != nil {
 				logger.Debugf("DNS64: pack error for %v: %v", req.Question, err)
