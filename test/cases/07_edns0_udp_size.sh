@@ -59,7 +59,7 @@ log "PASS: TCP responses not truncated"
 log "Test 6: Multi-AAAA response fits in negotiated buffer"
 # dns.google returns 2 A records (synthesized to 2 AAAA), should fit in 4096 easily
 resp=$(exec_b dig "@${DNS64_LISTEN_ADDR}" dns.google AAAA +bufsize=4096 +time=5 +tries=2)
-answer_count=$(echo "$resp" | grep -E '^;; ANSWER:' | awk '{print $4}')
+answer_count=$(echo "$resp" | awk '$4 == "AAAA" { count++ } END { print count + 0 }')
 if [ "$answer_count" -lt 2 ]; then
     fail "Expected at least 2 AAAA answers for dns.google, got $answer_count"
 fi

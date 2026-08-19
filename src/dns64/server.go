@@ -228,8 +228,15 @@ func (s *Service) serveUDP(conn *gonet.UDPConn, logger *log.Logger) {
 
 			resp := s.proxy.handle(req)
 
-			if clientOPT != nil && resp.IsEdns0() == nil {
-				resp.SetEdns0(maxUDPSize, false)
+			if clientOPT != nil {
+				filteredExtra := resp.Extra[:0]
+				for _, rr := range resp.Extra {
+					if rr.Header().Rrtype != dns.TypeOPT {
+						filteredExtra = append(filteredExtra, rr)
+					}
+				}
+				resp.Extra = filteredExtra
+				resp.SetEdns0(maxUDPSize, clientOPT.Do())
 			}
 
 			if resp.Len() > udpSize {
