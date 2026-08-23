@@ -244,6 +244,9 @@ via a raw socket. There is no IP-header translation anywhere in the path.
   work through `ydn64`.**
 - **No DNSSEC validation.** `ydn64` is a security-oblivious DNS64 in the
   RFC 6147 §3 sense; synthesised answers cannot be validated by the client.
+  Validating clients are handled per RFC 6147 §5.5: queries carrying both
+  CD=1 and DO=1 are relayed upstream verbatim (no synthesis, no cache), and
+  `ydn64` never asserts the AD bit on responses it generates or modifies.
 - **No RFC 8781 PREF64 discovery.** A TUN-less node has no L2 presence and
   cannot emit Router Advertisements, so clients that prefer RA-based
   discovery (recent iOS/Android) must use RFC 7050 (`ipv4only.arpa`) or be

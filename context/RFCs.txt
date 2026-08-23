@@ -94,7 +94,9 @@ RFC 6147 — DNS64: DNS Extensions for NAT from IPv6 Clients to IPv4 Servers
                      of the upstream response (makes SOA-based negative
                      caching work downstream)                          [DONE]
       - §5.4         EDNS(0) handling and truncation / TC bit          [DONE]
-      - §5.5         DNSSEC: honour CD=1&&DO=1, never assert AD        [TODO]
+      - §5.5         DNSSEC: honour CD=1&&DO=1 (verbatim relay, no
+                     synthesis, no cache; upstream AD preserved) and
+                     never assert AD on generated/modified data       [DONE]
       - §5.1.1       synthesis when real AAAA exist              [DEVIATION]
       - §5.3.3       A-record suppression                        [DEVIATION]
       - §5.3.1       PTR strategy (resolves in-addr.arpa directly
@@ -189,9 +191,10 @@ RFC 3596 — DNS Extensions to Support IP Version 6                     [DONE]
 
 RFC 6891 — Extension Mechanisms for DNS (EDNS(0))                  [PARTIAL]
     Obsoletes RFC 2671, which RFC 6147 §5.4 cites. UDP payload size
-    negotiation and truncation implemented (§6.2.3-6.2.5). Outstanding:
+    negotiation and truncation implemented (§6.2.3-6.2.5).     Outstanding:
       - EDNS(0) options (e.g., COOKIE, CLIENT-SUBNET)            [TODO]
-      - DNSSEC support (DO bit, CD bit) — see RFC 6147 §5.5     [TODO]
+      - DNSSEC support (DO bit, CD bit) — see RFC 6147 §5.5      [DONE]
+        (minimum viable subset; ydn64 does not validate)
 
 RFC 2308 — Negative Caching of DNS Queries (DNS NCACHE)               [DONE]
     Source of the SOA TTL used by RFC 6147 §5.1.7's TTL rule. The
@@ -215,11 +218,13 @@ RFC 7766 — DNS Transport over TCP - Implementation Requirements    [PARTIAL]
 RFC 4074 — Common Misbehavior Against DNS Queries for IPv6 Addresses   [N/A]
     Informational; motivates RFC 6147 §5.1.2's RCODE handling rules.
 
-RFC 4033 / 4034 / 4035 — DNSSEC                                       [TODO]
-    Required by RFC 6147 §5.5. ydn64 is a security-oblivious DNS64.
-    Minimum viable subset: honour CD=1 && DO=1 by disabling synthesis,
-    and never assert the AD bit on unvalidated data. Full validating
-    DNS64 (vDNS64) is a much larger piece of work.
+RFC 4033 / 4034 / 4035 — DNSSEC                                  [PARTIAL]
+    Required by RFC 6147 §5.5. Minimum viable subset implemented:
+    queries with CD=1 && DO=1 are relayed upstream verbatim (no
+    synthesis, no cache; a validating upstream's AD bit is preserved),
+    and every response ydn64 generates or modifies clears the AD bit.
+    ydn64 still performs no validation of its own — full validating
+    DNS64 (vDNS64) is a much larger piece of work.                  [DEFERRED]
 
 RFC 5358 (BCP 140) — Preventing Use of Recursive Nameservers in
                      Reflector Attacks                             [PARTIAL]

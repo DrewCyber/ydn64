@@ -146,6 +146,18 @@ func (p *proxy) getForwarder(z *zone) string {
 	return p.cfg.Load().defaultForward
 }
 
+// dnssecValidatingClient reports whether the request carries both the DNSSEC
+// OK (DO) and Checking Disabled (CD) bits — i.e. the client performs DNSSEC
+// validation itself and must receive upstream data unsynthesised
+// (RFC 6147 §5.5, implementing the RFC 4033–4035 requirements).
+func dnssecValidatingClient(req *dns.Msg) bool {
+	if !req.CheckingDisabled {
+		return false
+	}
+	opt := req.IsEdns0()
+	return opt != nil && opt.Do()
+}
+
 // handle processes a single DNS request and returns a response message.
 func (p *proxy) handle(req *dns.Msg) *dns.Msg {
 	if len(req.Question) == 0 {
@@ -167,30 +179,50 @@ func (p *proxy) handle(req *dns.Msg) *dns.Msg {
 
 	var resp *dns.Msg
 	var err error
+	// proxied marks responses relayed untouched from upstream on behalf of a
+	// DNSSEC-validating client (RFC 6147 §5.5): their header flags — including
+	// an AD bit asserted by a validating upstream — belong to the upstream and
+	// are passed through as-is. Every other response is stripped of AD.
+	proxied := false
 
 	if q.Qclass != dns.ClassINET {
 		resp, err = p.passThrough(req, server)
 	} else {
 		switch q.Qtype {
 		case dns.TypeAAAA:
-			resp, err = p.handleAAAA(req, &q, z, server)
+			if dnssecValidatingClient(req) {
+				// RFC 4033–4035 via RFC 6147 §5.5: a validating client
+				// (CD=1 && DO=1) gets the upstream answer verbatim — no
+				// synthesis, no filtering, no cache.
+				proxied = true
+				resp, err = p.passThrough(req, server)
+			} else {
+				resp, err = p.handleAAAA(req, &q, z, server)
+			}
 		case dns.TypeANY:
-			// ydn64 only ever serves IPv6-only clients, so a raw ANY answer
-			// containing real A records would be unusable to them anyway.
-			// Reuse the AAAA synthesis/filter path (respecting the zone's
-			// return-ipv4-addresses/return-ipv6-addresses/prefix rules)
-			// instead of blindly passing through whatever the upstream
-			// resolver returns for ANY (which varies wildly — some upstreams
-			// apply RFC 8482 and reply with a bare HINFO record). The upstream
-			// query itself must ask for AAAA, not ANY — handleAAAA uses q's
-			// Qtype verbatim when building its upstream query, so an
-			// unmodified ANY question here would leak straight through as an
-			// upstream ANY query instead of triggering real AAAA synthesis.
-			aaaaQ := q
-			aaaaQ.Qtype = dns.TypeAAAA
-			resp, err = p.handleAAAA(req, &aaaaQ, z, server)
-			if resp != nil {
-				resp.Question[0].Qtype = dns.TypeANY
+			if dnssecValidatingClient(req) {
+				// Validating clients must not receive synthesised data; relay
+				// the ANY query itself instead of rewriting it to AAAA.
+				proxied = true
+				resp, err = p.passThrough(req, server)
+			} else {
+				// ydn64 only ever serves IPv6-only clients, so a raw ANY answer
+				// containing real A records would be unusable to them anyway.
+				// Reuse the AAAA synthesis/filter path (respecting the zone's
+				// return-ipv4-addresses/return-ipv6-addresses/prefix rules)
+				// instead of blindly passing through whatever the upstream
+				// resolver returns for ANY (which varies wildly — some upstreams
+				// apply RFC 8482 and reply with a bare HINFO record). The upstream
+				// query itself must ask for AAAA, not ANY — handleAAAA uses q's
+				// Qtype verbatim when building its upstream query, so an
+				// unmodified ANY question here would leak straight through as an
+				// upstream ANY query instead of triggering real AAAA synthesis.
+				aaaaQ := q
+				aaaaQ.Qtype = dns.TypeAAAA
+				resp, err = p.handleAAAA(req, &aaaaQ, z, server)
+				if resp != nil {
+					resp.Question[0].Qtype = dns.TypeANY
+				}
 			}
 		case dns.TypeA:
 			resp, err = p.handleA(req, &q, z, server)
@@ -207,6 +239,12 @@ func (p *proxy) handle(req *dns.Msg) *dns.Msg {
 		return r
 	}
 	resp.RecursionAvailable = true
+	if !proxied {
+		// RFC 6147 §5.5 / RFC 4035: ydn64 never validates DNSSEC, so it must
+		// never assert the AD bit on data it generated, filtered, cached, or
+		// rewrote — nor echo a query's own AD flag back to the client.
+		resp.AuthenticatedData = false
+	}
 	return resp
 }
 
