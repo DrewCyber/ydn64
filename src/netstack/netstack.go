@@ -72,8 +72,16 @@ func CreateYdn64Netstack(ygg *core.Core, ifMTU uint64, pool6CIDR string) (*Yggdr
 	// source. Keeping HandleLocal false avoids that gVisor foot-gun entirely.
 	s := &YggdrasilNetstack{
 		stack: stack.New(stack.Options{
-			NetworkProtocols:   []stack.NetworkProtocolFactory{ipv6.NewProtocol},
-			TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol6},
+			NetworkProtocols: []stack.NetworkProtocolFactory{ipv6.NewProtocol},
+			// CUBIC instead of the gVisor default (Reno): CUBIC is the
+			// modern de-facto standard (Linux default since 2008) and
+			// recovers throughput much faster after loss on high-BDP paths
+			// — exactly the shape of long Yggdrasil tunnels. Harness
+			// benchmarks show parity on lossless paths (see
+			// context/migration-to-gvisor.md "T6 findings"), so this is a
+			// bet on lossy real-world tunnels, backed by upstream Linux
+			// defaults.
+			TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocolCUBIC, udp.NewProtocol, icmp.NewProtocol6},
 		}),
 	}
 

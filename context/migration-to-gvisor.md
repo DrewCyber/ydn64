@@ -17,7 +17,7 @@ All API names cited below were verified against the exact vendored version.
 | T3  | Integration verification + fragmented-UDP test case          | P1       | T1         | DONE   |
 | T4  | Stack & per-flow stats exposure                              | P2       | —          | DONE   |
 | T5  | Packet tap (multi-listener) via `RegisterPacketEndpoint`     | P2       | —          | DONE   |
-| T6  | Spike: congestion control / MTU probing tunables             | P3       | —          |        |
+| T6  | Spike: congestion control / MTU probing tunables             | P3       | —          | DONE   |
 | T7  | Spike: IPTables/nftables-based `AllowedSources`              | P3       | —          |        |
 
 ---
@@ -710,3 +710,48 @@ End-to-end: container A restarted with `YDN64_DEBUG_PCAP=/work/tap.pcap`,
 case 08 traffic driven from B, resulting 13 KB capture parsed on the host:
 valid pcap header, 14 IPv6 records including port-53 DNS exchanges and
 ≤1496-byte gVisor egress fragments of the 4000-byte reply.
+
+### T6 findings — DONE (2026-08-23), decision: switch to CUBIC, no knobs
+
+- **Available algorithms** (runtime query via
+  `TCPAvailableCongestionControlOption`): `reno cubic`. The gVisor default
+  factory (`tcp.NewProtocol`, used by ydn64 until now) selects **Reno**;
+  CUBIC requires `tcp.NewProtocolCUBIC` or a runtime
+  `SetTransportProtocolOption`.
+- **Benchmark** (harness: B → NAT64 TCP → loopback sink in A, 98 MB per run,
+  5 runs per variant, millisecond wall clock):
+  - Reno (freshly rebuilt image): 808 / 837 / 854 / 905 / 827 ms
+  - CUBIC (freshly rebuilt image): 861 / 867 / 807 / 805 / 799 ms
+  - **Parity.** ~115–120 MB/s either way. An earlier "Reno is 1.65 s" reading
+    was a first-boot measurement artifact (warm-up of the fresh environment),
+    disproven by the rebuilt control — a good reminder to re-baseline before
+    crediting an algorithm change.
+  - Lossless-path parity matches theory: without loss both algorithms spend
+    their time in slow start and steady-state AIMD; CUBIC's advantage only
+    materializes after congestion events. Simulating loss would need netem +
+    CAP_NET_ADMIN inside container A, i.e. harness topology changes that this
+    spike deliberately avoided.
+- **Decision: switch the transport factory to `NewProtocolCUBIC`
+  unconditionally, expose NO config knob.**
+  Rationale: zero measured downside on lossless paths; strictly better
+  post-loss behavior on high-BDP paths (the shape of real multi-hop
+  Yggdrasil tunnels, where loss does occur); it is the Linux default since
+  2008 so it matches what the far end (the IPv4 server side of proxied flows)
+  itself runs; and a config knob for a choice with no user-measurable effect
+  on our benchmark would be knob bloat (ground rule 7 discourages schema
+  changes without payoff).
+- **MTU probing: not available in this vendored gVisor version.**
+  `tcpip.MTUProbingOption` does not exist anywhere in
+  `gvisor.dev/gvisor@v0.0.0-20250812171554-968e93457fe6` (verified by grep
+  over the module). The task text's claim was stale. Black-hole detection is
+  therefore impossible today; PMTUD relies on in-band ICMPv6 Packet Too Big
+  messages, which ydn64's netstack emits on egress (observed live during T3's
+  ipv6rwc MTU investigation). Revisit if/when gVisor lands MTU probing.
+
+Tests added: `src/netstack/netstack_test.go` —
+`TestCreateYdn64NetstackUsesCubic` drives the REAL constructor path with an
+offline-generated Yggdrasil core (no peers/listeners) and asserts the active
+congestion control is `cubic` while both `reno` and `cubic` remain available.
+
+Verification: build/vet clean; `go test -race ./...` clean; full podman suite
+green on the CUBIC build.
