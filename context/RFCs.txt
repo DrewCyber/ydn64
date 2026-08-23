@@ -41,10 +41,14 @@ RFC 6146 — Stateful NAT64: Network Address and Protocol Translation from
       - §3.5.1 / §4  UDP session lifetime floor (UDP_MIN = 2 min) and
                      default (UDP_DEFAULT = 5 min): Nat64UdpTimeout
                      defaults to 300 s and Validate() enforces >= 120 s [DONE]
-      - §3.5.3 / §4  ICMP session lifetime (ICMP_DEFAULT = 60 s; ydn64
-                     hardcodes 30 s) and NAT-allocated ICMP Identifier
-                     (client's Identifier is used verbatim, so replies can
-                     be hijacked across peers)                         [TODO]
+      - §3.5.3 / §4  ICMP session lifetime and NAT-allocated ICMP
+                     Identifier (RFC 5508 REQ-1/REQ-2): outbound Echo
+                     Requests carry a ydn64-allocated identifier mapped to
+                     (client, destination, client ID); the client-chosen
+                     ID never reaches the IPv4 side, replies restore it,
+                     repeat queries reuse their allocation, and the table
+                     is capped (maxICMPSessions); idle timeout fixed at
+                     60 s                                              [DONE]
       - §5.3         resource limits / anti-DoS: no session caps or
                      per-source quotas yet. Also a MAY worth a knob:
                      udpReplyLoop refreshes lastSeen on every inbound v4
@@ -158,8 +162,9 @@ RFC 5382 (BCP 142) — NAT Behavioral Requirements for TCP           [PARTIAL]
     REQ-1/2/3 (EIM, full state machine, inbound SYN) are architectural. [N/A]
 
 RFC 5508 (BCP 148) — NAT Behavioral Requirements for ICMP          [PARTIAL]
-    REQ-1 NAT-assigned ICMP Identifier                                [TODO]
-    REQ-2 ICMP Query session timeout >= 60 s                          [TODO]
+    REQ-1 NAT-assigned ICMP Identifier (client IDs never exposed,
+          replies demuxed by allocated ID)                             [DONE]
+    REQ-2 ICMP Query session timeout >= 60 s (fixed 60 s)             [DONE]
     REQ-3/4 ICMP error translation                                    [TODO]
     REQ-10 ICMP hairpinning                                            [N/A]
 

@@ -3,6 +3,7 @@ package nat64
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -52,8 +53,11 @@ type Service struct {
 	ns       NetStack
 	sessions sync.Map // sessionKey → *udpSession
 
-	icmpConn     *icmp.PacketConn
-	icmpSessions sync.Map // icmpSessionKey → *icmpSession
+	icmpConn     icmpPacketConn
+	icmpSessions sync.Map // icmpSessionKey{dstAddr, NAT-assigned id} → *icmpSession
+	icmpQueries  sync.Map // icmpQueryKey{srcAddr, dstAddr, client id} → *icmpSession
+	icmpNextID   atomic.Uint32
+	icmpCount    atomic.Int64
 	icmpClosed   atomic.Bool
 
 	// statsMu guards lastStatSnap, shared by the periodic stats loop and
@@ -85,6 +89,7 @@ func NewService(cfg config.NAT64Config, allowedSources []string, ignoredDstSubne
 		pool6Net: pool6Net,
 		ns:       ns,
 	}
+	s.icmpNextID.Store(rand.Uint32()) // unpredictable starting point for NAT-assigned ICMP identifiers
 	s.settings.Store(&nat64Settings{
 		allowedNets:    config.ParseAllowedNets(allowedSources),
 		ignoredDstNets: config.ParseIPNets(ignoredDstSubnets),
@@ -149,19 +154,21 @@ func (s *Service) Start(ctx context.Context, logger *log.Logger) {
 	})
 	s.ns.Stack().SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd.HandlePacket)
 
-	// ── ICMP: NIC-level packet interceptor ───────────────────────────────────
-	s.ns.SetPacketInterceptor(s.interceptPacket)
-
 	// ── ICMP: shared raw socket for Echo Request/Reply translation ──────────
 	// Best-effort: requires CAP_NET_RAW. If unavailable, NAT64 ICMP is simply
 	// disabled (interceptICMPPacket drops instead of forwarding); TCP/UDP keep
-	// working normally.
+	// working normally. The socket is opened and published BEFORE the packet
+	// interceptor is installed, so the interceptor never observes a
+	// half-initialised icmpConn.
 	if conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0"); err != nil {
 		logger.Printf("NAT64 ICMP disabled (raw socket unavailable, needs CAP_NET_RAW): %v", err)
 	} else {
 		s.icmpConn = conn
 		go s.icmpReplyLoop()
 	}
+
+	// ── ICMP: NIC-level packet interceptor ───────────────────────────────────
+	s.ns.SetPacketInterceptor(s.interceptPacket)
 
 	// ── Session cleanup goroutine ────────────────────────────────────────────
 	go s.cleanupSessions(ctx)
@@ -192,10 +199,6 @@ func (s *Service) interceptPacket(pkt []byte) bool {
 // cleanupSessions periodically expires idle UDP sessions and ICMP echo
 // sessions, and tears down the raw ICMP socket on shutdown.
 func (s *Service) cleanupSessions(ctx context.Context) {
-	// ICMP sessions use a fixed timeout independent of Nat64UdpTimeout, since
-	// echo request/reply exchanges are short-lived by nature.
-	const icmpSessionTimeout = 30 * time.Second
-
 	interval := icmpSessionTimeout / 2
 	if t := s.udpTimeout(); t > 0 && t/2 < interval {
 		interval = t / 2
@@ -237,9 +240,17 @@ func (s *Service) cleanupSessions(ctx context.Context) {
 				})
 			}
 			icmpCutoff := time.Now().Add(-icmpSessionTimeout).UnixNano()
-			s.icmpSessions.Range(func(k, v any) bool {
-				if atomic.LoadInt64(&v.(*icmpSession).lastSeenNs) < icmpCutoff {
-					s.icmpSessions.Delete(k)
+			s.icmpQueries.Range(func(k, v any) bool {
+				qk := k.(icmpQueryKey)
+				sess := v.(*icmpSession)
+				if atomic.LoadInt64(&sess.lastSeenNs) < icmpCutoff {
+					// CompareAndDelete so a session refreshed (or re-registered
+					// under the same query key) after we loaded it is never
+					// evicted; the NAT-side slot is dropped with it.
+					if s.icmpQueries.CompareAndDelete(qk, sess) {
+						s.icmpSessions.Delete(icmpSessionKey{dstAddr: qk.dstAddr, id: sess.allocID})
+						s.icmpCount.Add(-1)
+					}
 				}
 				return true
 			})

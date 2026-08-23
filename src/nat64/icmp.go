@@ -10,20 +10,62 @@ import (
 	"golang.org/x/net/ipv4"
 )
 
-// icmpSessionKey identifies an in-flight NAT64 ICMP echo exchange. ICMP has
-// no ports, so (destination IPv4, echo ID) is the closest analogue of a UDP
-// 4-tuple for demultiplexing replies read off the single shared raw socket.
+// icmpSessionTimeout is the idle lifetime of a NAT64 ICMP query session.
+// RFC 5508 REQ-2 requires an ICMP query timeout of at least 60 seconds;
+// RFC 6146 §4 specifies the same 60 s default (ICMP_DEFAULT).
+const icmpSessionTimeout = 60 * time.Second
+
+// maxICMPSessions bounds how many concurrent ICMP echo sessions are tracked.
+// Requests arriving while the table is full are dropped instead of growing it
+// without limit (an allowed peer must not be able to pin unbounded state).
+const maxICMPSessions = 4096
+
+// maxICMPIDAllocAttempts bounds how many NAT-side identifier candidates a
+// single request may probe before giving up.
+const maxICMPIDAllocAttempts = 64
+
+// icmpPacketConn is the subset of *icmp.PacketConn the NAT64 ICMP path uses.
+// Declared as an interface so unit tests can inject a fake socket without
+// CAP_NET_RAW or real network traffic.
+type icmpPacketConn interface {
+	WriteTo(b []byte, dst net.Addr) (int, error)
+	ReadFrom(b []byte) (int, net.Addr, error)
+	SetReadDeadline(t time.Time) error
+	Close() error
+}
+
+var _ icmpPacketConn = (*icmp.PacketConn)(nil)
+
+// icmpSessionKey identifies a NAT-allocated outbound echo slot: replies read
+// off the single shared raw socket are demultiplexed by (reply source IPv4,
+// NAT-assigned identifier). The identifier here is the one ydn64 put on the
+// wire toward the IPv4 destination — never the client's own (RFC 6146
+// §3.5.3 / §4, RFC 5508 REQ-1: clients must not be able to choose, observe,
+// or collide on identifiers other sessions' replies are matched against).
 type icmpSessionKey struct {
 	dstAddr [4]byte
-	id      uint16
+	id      uint16 // NAT-assigned identifier
+}
+
+// icmpQueryKey identifies the client-side tuple of an echo exchange:
+// repeat requests from the same client toward the same destination with the
+// same identifier (ping retries, subsequent sequence numbers) reuse their
+// existing NAT allocation instead of minting a new one per request.
+type icmpQueryKey struct {
+	srcAddr [16]byte // Yggdrasil client address
+	dstAddr [4]byte  // real IPv4 destination
+	id      uint16   // client's echo identifier
 }
 
 // icmpSession tracks where an outstanding Echo Request's reply should be
-// translated back to.
+// translated back to, plus the NAT-assigned identifier under which the
+// request was sent toward the real IPv4 destination.
 type icmpSession struct {
 	pool6Src   [16]byte // pool6::IPv4 — becomes the ICMPv6 reply's source
 	yggDst     [16]byte // original Yggdrasil sender — becomes the reply's destination
-	lastSeenNs int64
+	clientID   uint16   // identifier from the Yggdrasil client's Echo Request
+	allocID    uint16   // NAT-assigned identifier used on the IPv4 side
+	lastSeenNs int64    // Unix nanosecond timestamp, updated atomically
 }
 
 // interceptICMPPacket is installed (via interceptPacket) as part of the
@@ -80,39 +122,91 @@ func (s *Service) interceptICMPPacket(pkt []byte) bool {
 	data := make([]byte, len(pkt)-48)
 	copy(data, pkt[48:])
 
-	go s.forwardICMP(srcAddr, pool6Src, dstIPv4, id, seq, data)
+	sess := s.registerICMPSession(srcAddr, pool6Src, dstIPv4, id)
+	if sess == nil {
+		return true // consumed (dropped): table full or no identifier available
+	}
+	go s.forwardICMP(sess, dstIPv4, seq, data)
 	return true
 }
 
-// forwardICMP records the session and sends a translated ICMPv4 Echo
-// Request to the real IPv4 destination via the shared raw socket.
-func (s *Service) forwardICMP(srcAddr, pool6Src [16]byte, dstIPv4 [4]byte, id, seq uint16, data []byte) {
-	key := icmpSessionKey{dstAddr: dstIPv4, id: id}
-	sess := &icmpSession{pool6Src: pool6Src, yggDst: srcAddr}
-	atomic.StoreInt64(&sess.lastSeenNs, time.Now().UnixNano())
-	s.icmpSessions.Store(key, sess)
+// registerICMPSession records (or refreshes) the session for a client echo
+// request and returns it carrying a valid NAT-assigned allocID.
+//
+// It must only ever run from the NIC read loop: that loop is the sole writer
+// of new sessions, which makes the allocate-check-publish sequence below
+// race-free without locks (the reply loop and cleanup goroutine only read,
+// refresh lastSeen atomically, and delete expired entries).
+//
+// RFC 6146 §3.5.3 / RFC 5508 REQ-1: the outbound identifier is allocated by
+// the NAT, mapped back to (client, destination, client identifier); the
+// client-chosen identifier is never exposed on the IPv4 side.
+func (s *Service) registerICMPSession(srcAddr, pool6Src [16]byte, dstIPv4 [4]byte, clientID uint16) *icmpSession {
+	qKey := icmpQueryKey{srcAddr: srcAddr, dstAddr: dstIPv4, id: clientID}
+	if v, ok := s.icmpQueries.Load(qKey); ok {
+		sess := v.(*icmpSession)
+		atomic.StoreInt64(&sess.lastSeenNs, time.Now().UnixNano())
+		return sess
+	}
 
+	if s.icmpCount.Load() >= maxICMPSessions {
+		return nil
+	}
+
+	sess := &icmpSession{
+		pool6Src: pool6Src,
+		yggDst:   srcAddr,
+		clientID: clientID,
+	}
+	atomic.StoreInt64(&sess.lastSeenNs, time.Now().UnixNano())
+	for i := 0; i < maxICMPIDAllocAttempts; i++ {
+		cand := uint16(s.icmpNextID.Add(1)) // wraps naturally through uint16 truncation
+		if cand == 0 {
+			continue // never emit identifier zero
+		}
+		sKey := icmpSessionKey{dstAddr: dstIPv4, id: cand}
+		if _, exists := s.icmpSessions.Load(sKey); exists {
+			continue // wraparound collision with a live session — try next candidate
+		}
+		sess.allocID = cand
+		s.icmpSessions.Store(sKey, sess)
+		s.icmpQueries.Store(qKey, sess)
+		s.icmpCount.Add(1)
+		return sess
+	}
+	return nil
+}
+
+// forwardICMP sends a translated ICMPv4 Echo Request to the real IPv4
+// destination via the shared raw socket, using the session's NAT-assigned
+// identifier in place of the client's.
+func (s *Service) forwardICMP(sess *icmpSession, dstIPv4 [4]byte, seq uint16, data []byte) {
+	conn := s.icmpConn
+	if conn == nil {
+		return
+	}
 	msg := icmp.Message{
 		Type: ipv4.ICMPTypeEcho,
 		Code: 0,
-		Body: &icmp.Echo{ID: int(id), Seq: int(seq), Data: data},
+		Body: &icmp.Echo{ID: int(sess.allocID), Seq: int(seq), Data: data},
 	}
 	b, err := msg.Marshal(nil)
 	if err != nil {
 		return
 	}
-	_, _ = s.icmpConn.WriteTo(b, &net.IPAddr{IP: net.IP(dstIPv4[:])})
+	_, _ = conn.WriteTo(b, &net.IPAddr{IP: net.IP(dstIPv4[:])})
 }
 
-// icmpReplyLoop continuously reads ICMPv4 Echo Replies off the single
-// shared raw socket and translates each one back into a synthesised IPv6
-// ICMPv6 Echo Reply, looking up the originating session by (source IPv4,
-// echo ID).
+// icmpReplyLoop continuously reads ICMPv4 messages off the single shared raw
+// socket and translates Echo Replies back into synthesised IPv6 ICMPv6 Echo
+// Replies, looking up the originating session by (reply source IPv4,
+// NAT-assigned identifier).
 func (s *Service) icmpReplyLoop() {
 	buf := make([]byte, int(s.ns.MTU()))
 	for {
-		_ = s.icmpConn.SetReadDeadline(time.Now().Add(time.Second))
-		n, peer, err := s.icmpConn.ReadFrom(buf)
+		conn := s.icmpConn
+		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+		n, peer, err := conn.ReadFrom(buf)
 		if err != nil {
 			if s.icmpClosed.Load() {
 				return
@@ -140,15 +234,25 @@ func (s *Service) icmpReplyLoop() {
 
 		var srcAddr [4]byte
 		copy(srcAddr[:], ip4)
-		key := icmpSessionKey{dstAddr: srcAddr, id: uint16(echo.ID)}
-		val, ok := s.icmpSessions.Load(key)
-		if !ok {
-			continue
-		}
-		sess := val.(*icmpSession)
-		atomic.StoreInt64(&sess.lastSeenNs, time.Now().UnixNano())
-
-		reply := buildIPv6ICMPEchoReplyPacket(sess.pool6Src[:], sess.yggDst[:], uint16(echo.ID), uint16(echo.Seq), echo.Data)
-		_, _ = s.ns.WritePacket(reply)
+		s.translateICMPv4Reply(srcAddr, echo)
 	}
+}
+
+// translateICMPv4Reply maps one real ICMPv4 Echo Reply back to its Yggdrasil
+// client: the session is looked up by (reply source, NAT-assigned
+// identifier), the client's own identifier is restored into the reply, and
+// the synthesised IPv6 packet is injected into the netstack. Reports whether
+// the reply was translated.
+func (s *Service) translateICMPv4Reply(srcV4 [4]byte, echo *icmp.Echo) bool {
+	key := icmpSessionKey{dstAddr: srcV4, id: uint16(echo.ID)}
+	val, ok := s.icmpSessions.Load(key)
+	if !ok {
+		return false // no matching session: unsolicited or expired reply
+	}
+	sess := val.(*icmpSession)
+	atomic.StoreInt64(&sess.lastSeenNs, time.Now().UnixNano())
+
+	reply := buildIPv6ICMPEchoReplyPacket(sess.pool6Src[:], sess.yggDst[:], sess.clientID, uint16(echo.Seq), echo.Data)
+	_, err := s.ns.WritePacket(reply)
+	return err == nil
 }
