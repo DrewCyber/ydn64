@@ -285,6 +285,11 @@ func main() {
 	if err != nil {
 		logger.Fatalf("failed to create netstack: %v", err)
 	}
+	// Supervise the NIC read loop: transient read errors are retried with
+	// backoff and logged here (instead of vanishing into stderr); if reads
+	// stay broken for the grace period, cancel() tears the process down so
+	// a supervisor restarts a visibly dead node instead of a deaf zombie.
+	ns.SuperviseReadLoop(cancel, logger, 0)
 
 	// ── Debug packet tap (YDN64_DEBUG_PCAP=path) ─────────────────────────────
 	// Inbound-only libpcap capture of what gVisor delivers on the NIC —

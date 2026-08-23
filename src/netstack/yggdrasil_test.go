@@ -1,9 +1,12 @@
 package netstack
 
 import (
+	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/yggdrasil-network/yggdrasil-go/src/ipv6rwc"
 
@@ -24,9 +27,15 @@ func newTestNIC(t *testing.T, mtu int, startFlusher bool) (*YggdrasilNIC, tcpip.
 	ygg := newTestCore(t)
 	rwc := ipv6rwc.NewReadWriteCloser(ygg)
 	rwc.SetMTU(uint64(mtu))
+	ns := &YggdrasilNetstack{}
+	ns.logf = func(string, ...interface{}) {} // keep test output clean
 	nic := &YggdrasilNIC{
-		ipv6rwc:     rwc,
+		netstack:    ns,
+		rwc:         rwc,
+		mtu:         uint32(mtu),
+		readBuf:     make([]byte, mtu),
 		ctrlPackets: make(chan *stack.PacketBuffer, 100),
+		readStop:    make(chan struct{}),
 	}
 	nic.initWriteBufs(mtu)
 
@@ -292,5 +301,172 @@ func TestWritePacketsConcurrentNoRace(t *testing.T) {
 	// writers*iters*3].
 	if min := writers * iters * 2; sum < min {
 		t.Errorf("total written packets = %d, want >= %d", sum, min)
+	}
+}
+
+// scriptedRW is a packetRW whose Read fails failN times, then parks until
+// release is closed (subsequent Reads return an error afterwards). It lets
+// tests drive the supervised read loop through transient-failure and
+// permanent-failure scenarios deterministically.
+type scriptedRW struct {
+	mu        sync.Mutex
+	failN     int
+	alwaysErr bool // true: never park, always fail
+	err       error
+	release   chan struct{}
+	reads     atomic.Int32
+}
+
+func (f *scriptedRW) Read(p []byte) (int, error) {
+	f.reads.Add(1)
+	f.mu.Lock()
+	fn := f.failN
+	if fn > 0 {
+		f.failN--
+	}
+	err := f.err
+	always := f.alwaysErr
+	f.mu.Unlock()
+	if fn > 0 || always {
+		return 0, err
+	}
+	<-f.release
+	return 0, err
+}
+
+func (f *scriptedRW) Write(p []byte) (int, error) { return len(p), nil }
+
+type logSpy struct {
+	mu   sync.Mutex
+	line []string
+}
+
+func (l *logSpy) Printf(format string, args ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.line = append(l.line, format)
+}
+
+func (l *logSpy) count() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.line)
+}
+
+// TestReadLoopCancelsAfterGracePeriod: with reads failing forever, the loop
+// must retry with backoff, keep logging, and finally invoke the supervised
+// cancel func instead of dying silently or spinning.
+func TestReadLoopCancelsAfterGracePeriod(t *testing.T) {
+	ns := &YggdrasilNetstack{}
+	spy := &logSpy{}
+	ns.logf = spy.Printf
+	ns.grace = 100 * time.Millisecond
+
+	cancelled := make(chan struct{})
+	var once sync.Once
+	ns.cancelRoot = func() { once.Do(func() { close(cancelled) }) }
+
+	rw := &scriptedRW{alwaysErr: true, err: errors.New("transport dead"), release: make(chan struct{})}
+	nic := &YggdrasilNIC{
+		netstack: ns,
+		rwc:      rw,
+		readBuf:  make([]byte, 128),
+		readStop: make(chan struct{}),
+	}
+	go ns.readLoop(nic)
+
+	select {
+	case <-cancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("read loop did not cancel the process context within the grace period")
+	}
+	if spy.count() < 3 {
+		t.Errorf("expected multiple error logs during retries, got %d", spy.count())
+	}
+}
+
+// TestReadLoopSurvivesTransientErrors: a couple of failed reads followed by
+// a parked transport must NOT trigger cancellation; the loop stays alive.
+func TestReadLoopSurvivesTransientErrors(t *testing.T) {
+	ns := &YggdrasilNetstack{}
+	ns.logf = (&logSpy{}).Printf
+	ns.grace = 30 * time.Second
+
+	cancelled := make(chan struct{})
+	var once sync.Once
+	ns.cancelRoot = func() { once.Do(func() { close(cancelled) }) }
+
+	release := make(chan struct{})
+	rw := &scriptedRW{failN: 2, err: errors.New("transient"), release: release}
+	nic := &YggdrasilNIC{
+		netstack: ns,
+		rwc:      rw,
+		readBuf:  make([]byte, 128),
+		readStop: make(chan struct{}),
+	}
+	go ns.readLoop(nic)
+
+	// Wait until the third Read (parked after two failures).
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && rw.reads.Load() < 3 {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if rw.reads.Load() < 3 {
+		t.Fatalf("reads = %d, want >= 3 (two transient failures + one parked)", rw.reads.Load())
+	}
+	select {
+	case <-cancelled:
+		t.Fatal("process context cancelled although reads recovered")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// Cleanup: unblock the parked Read with an error and stop the loop.
+	close(release)
+	close(nic.readStop)
+}
+
+// TestCtrlDropsCountedAndWarnedOnce: queue-full control-frame drops are
+// counted and produce exactly one rate-limited warning per window.
+func TestCtrlDropsCountedAndWarnedOnce(t *testing.T) {
+	nic, node, cleanup := newTestNIC(t, 1500, false)
+	defer cleanup()
+
+	spy := &logSpy{}
+	nic.netstack.logf = spy.Printf
+
+	q := make(chan *stack.PacketBuffer, 1)
+	nic.ctrlPackets = q
+
+	dst := yggDest(0x45)
+	sendBatch := func(n int) int {
+		list := stack.PacketBufferList{}
+		for i := 0; i < n; i++ {
+			list.PushBack(newTCPControlPacket(node, dst, 1000, 2000, header.TCPFlagAck, uint32(i+1)))
+		}
+		written, err := nic.WritePackets(list)
+		if err != nil {
+			t.Fatalf("WritePackets: %v", err)
+		}
+		decRefAll(list)
+		return written
+	}
+
+	if got := sendBatch(5); got != 1 {
+		t.Fatalf("written = %d, want 1 (queue capacity)", got)
+	}
+	if got := nic.netstack.CtrlPacketsDropped(); got != 4 {
+		t.Fatalf("dropped = %d, want 4", got)
+	}
+
+	if got := sendBatch(2); got != 0 {
+		t.Fatalf("written = %d, want 0 (queue still full)", got)
+	}
+	if got := nic.netstack.CtrlPacketsDropped(); got != 6 {
+		t.Fatalf("dropped = %d, want 6", got)
+	}
+
+	// The rate limiter must have emitted exactly one warning so far.
+	if got := spy.count(); got != 1 {
+		t.Fatalf("warnings = %d, want exactly 1 within the rate-limit window", got)
 	}
 }

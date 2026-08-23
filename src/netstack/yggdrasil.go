@@ -1,9 +1,9 @@
 package netstack
 
 import (
-	"log"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/yggdrasil-network/yggdrasil-go/src/core"
 	"github.com/yggdrasil-network/yggdrasil-go/src/ipv6rwc"
@@ -16,11 +16,21 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 )
 
+// packetRW abstracts the frame transport (Read/Write) so tests can inject
+// failing transports; *ipv6rwc.ReadWriteCloser is the production impl.
+type packetRW interface {
+	Read(p []byte) (int, error)
+	Write(p []byte) (int, error)
+}
+
+var _ packetRW = (*ipv6rwc.ReadWriteCloser)(nil)
+
 // YggdrasilNIC is a gVisor LinkEndpoint that routes packets through the
 // Yggdrasil network via ipv6rwc.
 type YggdrasilNIC struct {
 	netstack   *YggdrasilNetstack
-	ipv6rwc    *ipv6rwc.ReadWriteCloser
+	rwc        packetRW
+	mtu        uint32
 	dispatcher stack.NetworkDispatcher
 	readBuf    []byte
 	// writeBufs hands out private MTU-sized scratch buffers to writePacket.
@@ -32,6 +42,10 @@ type YggdrasilNIC struct {
 	// ctrlPackets queues zero-payload TCP control frames for asynchronous
 	// writing — see the comment in WritePackets for why.
 	ctrlPackets chan *stack.PacketBuffer
+	// readStop is closed exactly once when the NIC is removed, unblocking
+	// the read loop's retry backoff.
+	readStop     chan struct{}
+	readStopOnce sync.Once
 }
 
 // NewYggdrasilNIC creates the Yggdrasil NIC, attaches it to the gVisor stack,
@@ -48,9 +62,11 @@ func (s *YggdrasilNetstack) NewYggdrasilNIC(ygg *core.Core, ifMTU uint64) tcpip.
 	mtu := rwc.MTU()
 	nic := &YggdrasilNIC{
 		netstack:    s,
-		ipv6rwc:     rwc,
+		rwc:         rwc,
+		mtu:         uint32(mtu),
 		readBuf:     make([]byte, mtu),
 		ctrlPackets: make(chan *stack.PacketBuffer, 100),
+		readStop:    make(chan struct{}),
 	}
 	nic.initWriteBufs(int(mtu))
 
@@ -66,27 +82,7 @@ func (s *YggdrasilNetstack) NewYggdrasilNIC(ygg *core.Core, ifMTU uint64) tcpip.
 	}
 
 	// Packet receive loop: Yggdrasil network → gVisor stack.
-	go func() {
-		for {
-			rx, err := nic.ipv6rwc.Read(nic.readBuf)
-			if err != nil {
-				log.Println("yggdrasil NIC read error:", err)
-				break
-			}
-			// Pre-gVisor interception hook (used by NAT64 for UDP packets).
-			nic.netstack.mu.RLock()
-			interceptor := nic.netstack.interceptor
-			nic.netstack.mu.RUnlock()
-			if interceptor != nil && interceptor(nic.readBuf[:rx]) {
-				continue // packet was consumed by the interceptor
-			}
-			pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{
-				Payload: buffer.MakeWithData(nic.readBuf[:rx]),
-			})
-			nic.dispatcher.DeliverNetworkPacket(ipv6.ProtocolNumber, pkb)
-			pkb.DecRef()
-		}
-	}()
+	go s.readLoop(nic)
 
 	// Control packet flush loop: zero-payload TCP frames (SYN, SYN-ACK, ACK,
 	// FIN, RST) are queued here from WritePackets and written out
@@ -131,6 +127,81 @@ func (s *YggdrasilNetstack) NewYggdrasilNIC(ygg *core.Core, ifMTU uint64) tcpip.
 	return nil
 }
 
+// readLoop delivers inbound frames from the Yggdrasil transport into the
+// gVisor stack. A single transient Read error used to terminate this loop
+// permanently (logged only to stderr, invisible in the service log), leaving
+// the node running but deaf; instead, errors are now retried with bounded
+// exponential backoff, and when reads stay broken for the configured grace
+// period the process context is cancelled so a supervisor restarts an
+// obviously dead node rather than keeping a zombie alive.
+func (s *YggdrasilNetstack) readLoop(nic *YggdrasilNIC) {
+	backoff := readRetryInitialBackoff
+	brokenFor := time.Duration(0)
+	for {
+		rx, err := nic.rwc.Read(nic.readBuf)
+		if err == nil {
+			backoff, brokenFor = readRetryInitialBackoff, 0
+			s.deliverInbound(nic, rx)
+			continue
+		}
+
+		select {
+		case <-nic.readStop:
+			return
+		default:
+		}
+		s.mu.RLock()
+		logf, cancelRoot, grace := s.logf, s.cancelRoot, s.grace
+		s.mu.RUnlock()
+		if logf != nil {
+			logf("yggdrasil NIC read error (retrying in %v, broken for %v so far): %v", backoff, brokenFor+backoff, err)
+		}
+		if brokenFor+backoff >= grace {
+			if logf != nil {
+				logf("yggdrasil NIC read loop giving up after ~%v of consecutive failures; cancelling process context", brokenFor)
+			}
+			if cancelRoot != nil {
+				cancelRoot()
+			}
+			return
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-nic.readStop:
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		brokenFor += backoff
+		backoff *= 2
+		if backoff > readRetryMaxBackoff {
+			backoff = readRetryMaxBackoff
+		}
+	}
+}
+
+// deliverInbound hands one raw frame to the pre-gVisor interceptor (NAT64
+// ICMP) and then to the gVisor dispatcher. The dispatcher is nil between
+// Attach() and NIC removal — e.g. during shutdown races with Close() — in
+// which case the frame is dropped instead of dereferencing nil.
+func (s *YggdrasilNetstack) deliverInbound(nic *YggdrasilNIC, rx int) {
+	s.mu.RLock()
+	interceptor := s.interceptor
+	d := nic.dispatcher
+	s.mu.RUnlock()
+	if interceptor != nil && interceptor(nic.readBuf[:rx]) {
+		return // packet was consumed by the interceptor
+	}
+	if d == nil {
+		return
+	}
+	pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{
+		Payload: buffer.MakeWithData(nic.readBuf[:rx]),
+	})
+	d.DeliverNetworkPacket(ipv6.ProtocolNumber, pkb)
+	pkb.DecRef()
+}
+
 // initWriteBufs seeds the writeBufs pool with MTU-sized scratch buffers.
 func (e *YggdrasilNIC) initWriteBufs(mtu int) {
 	e.writeBufs.New = func() any {
@@ -145,7 +216,7 @@ func (e *YggdrasilNIC) Attach(dispatcher stack.NetworkDispatcher) { e.dispatcher
 
 func (e *YggdrasilNIC) IsAttached() bool { return e.dispatcher != nil }
 
-func (e *YggdrasilNIC) MTU() uint32 { return uint32(e.ipv6rwc.MTU()) }
+func (e *YggdrasilNIC) MTU() uint32 { return e.mtu }
 
 func (e *YggdrasilNIC) SetMTU(uint32) {}
 
@@ -170,7 +241,7 @@ func (e *YggdrasilNIC) writePacket(pkt *stack.PacketBuffer) tcpip.Error {
 	if err != nil {
 		return &tcpip.ErrAborted{}
 	}
-	if _, err := e.ipv6rwc.Write(buf[:n]); err != nil {
+	if _, err := e.rwc.Write(buf[:n]); err != nil {
 		return &tcpip.ErrAborted{}
 	}
 	return nil
@@ -196,17 +267,45 @@ func (e *YggdrasilNIC) WritePackets(list stack.PacketBufferList) (int, tcpip.Err
 				written++
 			default:
 				pkt.DecRef()
-				// Dropped because the queue was full: not written.
+				// Dropped because the queue was full: not written. This was
+				// historically a catastrophic silent failure mode, so it is
+				// counted and warned about (rate-limited).
+				e.netstack.noteCtrlDrop()
 			}
 			continue
 		}
 		if tcpErr := e.writePacket(pkt); tcpErr != nil {
-			log.Println("yggdrasil NIC write error:", tcpErr)
+			e.netstack.logfLocked("yggdrasil NIC write error: %v", tcpErr)
 			return written, tcpErr
 		}
 		written++
 	}
 	return written, nil
+}
+
+// noteCtrlDrop counts a control-frame drop and emits a warning at most once
+// per warn interval so a flood of drops cannot flood the log.
+func (s *YggdrasilNetstack) noteCtrlDrop() {
+	total := s.ctrlDrops.Add(1)
+	now := time.Now().UnixNano()
+	last := s.ctrlLastWarn.Load()
+	if last != 0 && now-last < ctrlDropWarnIntervalSecs*int64(time.Second) {
+		return
+	}
+	if !s.ctrlLastWarn.CompareAndSwap(last, now) {
+		return // another goroutine just warned
+	}
+	s.logfLocked("yggdrasil NIC ctrl queue full: %d control packets dropped in total; TCP handshake/teardown frames may be lost", total)
+}
+
+// logfLocked routes diagnostics to the supervised logger (stderr fallback).
+func (s *YggdrasilNetstack) logfLocked(format string, args ...interface{}) {
+	s.mu.RLock()
+	logf := s.logf
+	s.mu.RUnlock()
+	if logf != nil {
+		logf(format, args...)
+	}
 }
 
 func (e *YggdrasilNIC) WriteRawPacket(*stack.PacketBuffer) tcpip.Error {
@@ -223,6 +322,7 @@ func (e *YggdrasilNIC) ParseHeader(*stack.PacketBuffer) bool { return true }
 
 func (e *YggdrasilNIC) Close() {
 	e.netstack.stack.RemoveNIC(1)
+	e.readStopOnce.Do(func() { close(e.readStop) })
 	e.dispatcher = nil
 }
 

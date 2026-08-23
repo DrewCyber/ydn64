@@ -127,6 +127,29 @@ Severity: **P0** fix now · **P1** fix soon · **P2** should fix · **P3** polis
   `TestEDNS0EdgeCases`) now call the real function (new floor cases:
   0/1/100/511 → 512); RFCs.txt RFC 6891 entry updated. Harness case 07
   passes unchanged.
+- **[2026-08-23] R16 fixed** in `src/nat64/icmp.go` `interceptICMPPacket`:
+  before anything is relayed to the IPv4 internet, the IPv6 payload-length
+  header field must match the actual frame size exactly and the ICMPv6
+  checksum must verify against the real pseudo-header (via the existing
+  `ipv6UpperLayerChecksum`, verification form); malformed frames are
+  consumed/dropped. Covered by `src/nat64/icmp_validation_test.go`
+  (valid-request control + corrupted/zeroed checksums + length mismatches).
+- **[2026-08-23] R11 fixed** in `src/netstack/yggdrasil.go`: the NIC read
+  loop no longer exits permanently on its first Read error. Errors are
+  retried with bounded exponential backoff (10 ms → 1 s cap), logged via a
+  pluggable logger (`YggdrasilNetstack.SuperviseReadLoop(cancel, logf,
+  grace)` — main.go wires the service logger and root-context cancel), and
+  when reads stay broken past the grace period (default
+  `DefaultReadFailGrace` = 30 s) the loop cancels the process context so a
+  supervisor restarts a visibly dead node instead of a deaf zombie. The
+  transport is now an injectable `packetRW` interface, enabling the new
+  deterministic tests: cancel-after-grace and survive-transient-errors.
+  The loop also nil-checks the dispatcher before delivery, closing the
+  Close-vs-read-loop nil-deref risk noted under R17.
+- **[2026-08-23] R12 fixed**: queue-full `ctrlPackets` drops are now
+  counted (`YggdrasilNetstack.CtrlPacketsDropped()`) and produce a
+  rate-limited warning (one per 30 s window) instead of vanishing
+  silently. Covered by `TestCtrlDropsCountedAndWarnedOnce`.
 
 ---
 
@@ -171,18 +194,9 @@ The RFC 6052 variable-length alternative remains tracked in RFCs.txt.
 
 #### R10 · ~~EDNS(0) deviations from RFC 6891~~ — FIXED 2026-08-23 (see §1)
 
-#### R11 · NIC read loop exits permanently and near-silently on first error
-`yggdrasil.go`: one transient `ipv6rwc.Read` error logs to stderr (stdlib log —
-invisible in the service log file) and `break`s; node keeps running deaf.
-Retry transients with backoff; on terminal errors cancel the root context so
-the supervisor restarts a visibly-dead process instead of a zombie. Requires
-plumbing a logger into netstack.
+#### R11 · ~~NIC read loop exits permanently and near-silently on first error~~ — FIXED 2026-08-23 (see §1)
 
-#### R12 · Control-packet drops are invisible when `ctrlPackets` fills
-The `default: pkt.DecRef()` path discards SYN-ACK/FIN/RST with no signal — the
-historically catastrophic failure mode documented in this very file. Add a
-dropped counter + rate-limited warning; reconsider queue necessity once R1's
-per-call buffers land.
+#### R12 · ~~Control-packet drops are invisible when `ctrlPackets` fills~~ — FIXED 2026-08-23 (see §1)
 
 #### R13 · Silent error swallowing patterns
 Bare `recover()` hides panics and reports success (log value+stack, return
@@ -201,16 +215,13 @@ Image runs as root (binary needs nothing beyond optional CAP_NET_RAW) — add a
 non-root USER; entrypoint writes the config non-atomically and world-readable
 (generate to `.tmp`, `chmod 600`, `mv`); consider HEALTHCHECK.
 
-#### R16 · Remaining inbound-validation gap: the ICMP interceptor path
-After T1, forwarded TCP/UDP are structurally validated by gVisor (checksums,
-lengths). The raw-socket ICMP echo path still trusts the client frame:
-no IPv6 payload-length cross-check, no ICMPv6 checksum verification before
-relaying to the v4 internet. Cheap to add using the existing
-`ipv6UpperLayerChecksum`.
+#### R16 · ~~Remaining inbound-validation gap: the ICMP interceptor path~~ — FIXED 2026-08-23 (see §1)
 
 #### R17 · Small robustness batch
 - `dispatcher` field written/read without synchronisation (Attach/Close vs
-  read loop) — atomic pointer; Close-vs-read-loop nil deref risk.
+  read loop) — atomic pointer; ~~Close-vs-read-loop nil deref risk~~
+  (nil-deref half closed 2026-08-23: readLoop now nil-checks before
+  delivery; full synchronisation of Attach/Close still open).
 - Graceful shutdown: services have no Stop()/drain; in-flight work is killed
   at ctx cancellation. Add WaitGroup-based drain with bounded deadline.
 - `cleanupSessions` ticker cadence frozen at startup (cosmetic; per-session
@@ -252,5 +263,5 @@ relaying to the v4 internet. Cheap to add using the existing
 | 4 | R4 staged (~~cache caps → semaphores → session caps~~ done 2026-08-23; per-source token buckets open) + ~~R4b~~ (TTL semantics done 2026-08-23) | biggest stability win under adversarial load | medium |
 | 5 | ~~R9 (/96 + forwarder validation + empty-allowlist warning)~~ (done 2026-08-23) | silent misconfigs become startup errors | small |
 | 6 | ~~R10 (EDNS normalisation + real-function test)~~ (done 2026-08-23) | interop correctness | small |
-| 7 | R5 (ICMP ID rewrite), R16 (ICMP-path validation), R11/R12 | robustness | medium |
+| 7 | ~~R5 (ICMP ID rewrite), R16 (ICMP-path validation), R11/R12~~ (all done 2026-08-23) | robustness | medium |
 | 8 | R13–R15, R17, R18 | hygiene sweep | medium |

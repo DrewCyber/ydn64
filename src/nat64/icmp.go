@@ -119,6 +119,22 @@ func (s *Service) interceptICMPPacket(pkt []byte) bool {
 		return true // consumed (dropped)
 	}
 
+	// Inbound validation before anything is relayed toward the IPv4
+	// internet (forwarded TCP/UDP are already structurally validated by
+	// gVisor; this raw path is not):
+	//   1. The IPv6 payload-length header field must match the actual frame
+	//      size — a mismatched frame is malformed or crafted.
+	//   2. The ICMPv6 checksum must verify against the real pseudo-header;
+	//      relaying unverified frames would let an allowed peer inject
+	//      garbage into the v4 path under ydn64's own source address.
+	plen := int(binary.BigEndian.Uint16(pkt[4:6]))
+	if plen < 8 || len(pkt)-40 != plen {
+		return true // consumed (dropped): malformed frame
+	}
+	if cs := ipv6UpperLayerChecksum(srcAddr[:], pool6Src[:], 58, pkt[40:40+plen]); cs != 0 {
+		return true // consumed (dropped): invalid ICMPv6 checksum
+	}
+
 	data := make([]byte, len(pkt)-48)
 	copy(data, pkt[48:])
 

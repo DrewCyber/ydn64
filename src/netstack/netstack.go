@@ -1,9 +1,13 @@
 package netstack
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"net"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/yggdrasil-network/yggdrasil-go/src/core"
 	"github.com/yggdrasil-network/yggdrasil-go/src/ipv6rwc"
@@ -16,6 +20,17 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 )
 
+// Read-loop supervision defaults: transient read errors are retried with
+// bounded exponential backoff; if reads stay broken for a full grace period,
+// the loop cancels the process context so the supervisor sees a visibly dead
+// node instead of one that silently ignores all inbound traffic.
+const (
+	DefaultReadFailGrace     = 30 * time.Second
+	readRetryInitialBackoff  = 10 * time.Millisecond
+	readRetryMaxBackoff      = time.Second
+	ctrlDropWarnIntervalSecs = int64(30)
+)
+
 // YggdrasilNetstack wraps a gVisor network stack connected to the
 // Yggdrasil network via a custom LinkEndpoint (YggdrasilNIC).
 type YggdrasilNetstack struct {
@@ -24,7 +39,45 @@ type YggdrasilNetstack struct {
 
 	mu          sync.RWMutex
 	interceptor func([]byte) bool // called per-packet before gVisor delivery; true = packet consumed
+
+	// Read-loop supervision, wired via SuperviseReadLoop. Fields are guarded
+	// by mu because the supervisor may be attached after the read loop has
+	// already started.
+	cancelRoot context.CancelFunc
+	grace      time.Duration
+	logf       func(format string, args ...interface{})
+
+	// ctrlDrops counts control frames dropped because ctrlPackets was full;
+	// ctrlLastWarn rate-limits the accompanying warning (Unix nanos).
+	ctrlDrops    atomic.Int64
+	ctrlLastWarn atomic.Int64
 }
+
+// SuperviseReadLoop wires the NIC read loop to the process lifecycle:
+// logf receives read errors and drop warnings (nil → stderr via the stdlib
+// logger), and cancel is invoked — shutting the process down visibly — when
+// reads have been failing continuously for grace (0 → DefaultReadFailGrace).
+func (s *YggdrasilNetstack) SuperviseReadLoop(cancel context.CancelFunc, logf interface{ Printf(string, ...interface{}) }, grace time.Duration) {
+	wrapped := func(format string, args ...interface{}) {
+		if logf != nil {
+			logf.Printf(format, args...)
+			return
+		}
+		log.Printf(format, args...)
+	}
+	if grace <= 0 {
+		grace = DefaultReadFailGrace
+	}
+	s.mu.Lock()
+	s.cancelRoot = cancel
+	s.grace = grace
+	s.logf = wrapped
+	s.mu.Unlock()
+}
+
+// CtrlPacketsDropped reports how many zero-payload TCP control frames have
+// been discarded because the asynchronous control queue was full.
+func (s *YggdrasilNetstack) CtrlPacketsDropped() int64 { return s.ctrlDrops.Load() }
 
 // Stack returns the underlying gVisor stack (used by NAT64 to install TCP forwarder).
 func (s *YggdrasilNetstack) Stack() *stack.Stack { return s.stack }
