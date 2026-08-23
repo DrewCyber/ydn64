@@ -1,0 +1,62 @@
+name: CI
+
+# Gate every push to main and every pull request: build, vet and run the
+# full unit-test suite under the race detector (services spawn goroutines —
+# relays, cleanup tickers, stats loops — so -race is load-bearing here).
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Build, vet, test (-race)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race -count=1 ./...
+
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
+
+      # Error severity only for now: the harness sources lib.sh dynamically
+      # (SC1091) and shares constants through it (SC2034), which floods the
+      # lower severities with false positives. Raise once those are addressed.
+      - name: Lint shell scripts
+        run: >
+          shellcheck -S error
+          build
+          docker-entrypoint.sh
+          test/run.sh
+          test/lib.sh
+          test/yggclient-entrypoint.sh
+          test/cases/*.sh
