@@ -36,52 +36,6 @@ func TestIpv6UpperLayerChecksum(t *testing.T) {
 	}
 }
 
-// TestBuildIPv6UDPPacketZeroChecksum checks that buildIPv6UDPPacket correctly converts a computed
-// UDP checksum of 0x0000 to 0xFFFF.
-func TestBuildIPv6UDPPacketZeroChecksum(t *testing.T) {
-	// We need to engineer src, dst, ports and payload such that the checksum comes out to exactly 0x0000.
-	// In one's-complement arithmetic, ^sum == 0 means sum == 0xffff (after folding).
-	// Let's design a packet where everything sums up to a multiple of 0xffff.
-
-	src := make([]byte, 16)
-	dst := make([]byte, 16)
-
-	// Since we are free to set payload and port, we can construct the sum step-by-step.
-	// IPv6 Pseudo-header fields:
-	//   src (16 bytes of 0) => sum = 0
-	//   dst (16 bytes of 0) => sum = 0
-	//   length (4 bytes): udpLen is 8 + payloadLen. Let's make payloadLen = 4. Total upperLayer length = 12 (0x000c).
-	//                     binary.BigEndian.PutUint32(lenBuf, 12) => sum contribution = 0x000c
-	//   nextHeader (17 = 0x0011) => sum contribution = 0x0011
-	// At this point, pseudo-header sum = 0x000c + 0x0011 = 0x001d.
-	//
-	// UDP Header fields (offset 40):
-	//   srcPort, dstPort, udpLen (12 = 0x000c)
-	// Let's set srcPort = 0x0000, dstPort = 0x0000.
-	// Sum contribution from UDP header (excluding checksum placeholder):
-	//   0x000c (udpLen)
-	// Total sum so far = 0x001d + 0x000c = 0x0029.
-	//
-	// We want the total sum of all words to fold to 0xffff, so ^sum will be 0x0000.
-	// Remaining we need: 0xffff - 0x0029 = 0xffd6.
-	// Since payload is 4 bytes, we can represent it as two 16-bit words.
-	// Let's put 0xffd6 in the first 16-bit word, and 0x0000 in the second 16-bit word.
-	// Then total sum = 0x0029 + 0xffd6 + 0x0000 = 0xffff.
-	// When folded, sum = 0xffff.
-	// ^sum = ^0xffff = 0x0000.
-	// Thus, the computed checksum is 0x0000.
-	// With the fix, buildIPv6UDPPacket must rewrite this to 0xFFFF.
-
-	payload := []byte{0xff, 0xd6, 0x00, 0x00}
-	pkt := buildIPv6UDPPacket(src, dst, 0, 0, payload)
-
-	// The checksum field in the UDP header of the generated IPv6 packet is at offset 46 (pkt[46:48]).
-	cs := binary.BigEndian.Uint16(pkt[46:48])
-	if cs != 0xFFFF {
-		t.Errorf("Expected checksum to be 0xFFFF, got 0x%04x", cs)
-	}
-}
-
 // TestBuildIPv6ICMPEchoReplyPacketZeroChecksum checks that buildIPv6ICMPEchoReplyPacket
 // does NOT convert a computed ICMPv6 checksum of 0x0000 to 0xFFFF, because 0x0000 is a valid
 // ICMPv6 checksum.

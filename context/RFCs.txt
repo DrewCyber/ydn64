@@ -30,7 +30,11 @@ RFC 6146 — Stateful NAT64: Network Address and Protocol Translation from
     The primary NAT64 specification. Basic IPv6->IPv4 forwarding for TCP,
     UDP and ICMP Echo works. Outstanding:
       - §3.5 / §5.4  drop inbound IPv6 with a source inside Pref64::/n [DONE]
-      - §3.4         fragment handling                                 [TODO]
+      - §3.4         fragment handling: TCP/UDP fragments are reassembled
+                     by the gVisor netstack before translation and oversized
+                     replies are fragmented by it on egress; the raw-socket
+                     ICMP Echo path still only handles unfragmented
+                     datagrams                                   [PARTIAL]
       - §3.5.1 / §4  UDP session lifetime floor (UDP_MIN = 2 min,
                      UDP_DEFAULT = 5 min); ydn64 defaults to 30 s      [DONE]
       - §3.5.3 / §4  ICMP session lifetime (ICMP_DEFAULT = 60 s) and
@@ -77,11 +81,14 @@ RFC 7915 — IP/ICMP Translation Algorithm                               [N/A]
     since its absence breaks traceroute and PMTUD.                    [TODO]
 
 RFC 8200 — Internet Protocol, Version 6 (IPv6) Specification       [PARTIAL]
-    §8.1 upper-layer checksums over the IPv6 pseudo-header. Construction
-    is correct; the "a computed checksum of zero MUST be transmitted as
-    0xFFFF" rule for UDP is missing.                                  [DONE]
-    §4 extension-header chain walking is also absent — ydn64 reads only
-    the fixed header's Next Header byte.                              [TODO]
+    §8.1 upper-layer checksums over the IPv6 pseudo-header. The
+    synthesised ICMPv6 echo replies compute it correctly, and the UDP
+    zero-checksum rule (a computed checksum of 0 MUST be transmitted as
+    0xFFFF) is owned by the gVisor netstack since UDP moved to its
+    forwarder.                                                        [DONE]
+    §4 extension-header chain walking: gVisor walks the chain for TCP/UDP
+    (forwarder-terminated); only the NIC-intercepted ICMPv6 path still
+    assumes a fixed Next Header offset.                               [PARTIAL]
 
 RFC 4443 — ICMPv6 for the IPv6 Specification                       [PARTIAL]
     Echo Request/Reply (§4.1, §4.2) are handled correctly, checksum

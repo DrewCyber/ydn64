@@ -10,28 +10,46 @@ import (
 
 	"github.com/gologme/log"
 	"golang.org/x/net/icmp"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 
 	"github.com/DrewCyber/ydn64/src/config"
 	"github.com/DrewCyber/ydn64/src/netstack"
 )
 
-// Service implements TUN-less NAT64: it intercepts IPv6 packets addressed to
-// the pool6::/96 subnet and proxies them to real IPv4 destinations.
+// NetStack abstracts the gVisor-backed netstack surface the NAT64 service
+// uses. *netstack.YggdrasilNetstack satisfies it implicitly; defining the
+// interface lets unit tests supply a synthetic stack without a Yggdrasil core.
+type NetStack interface {
+	Stack() *stack.Stack
+	MTU() uint64
+	WritePacket(pkt []byte) (int, error)
+	SetPacketInterceptor(fn func([]byte) bool)
+}
+
+// Compile-time check that the production netstack satisfies NetStack.
+var _ NetStack = (*netstack.YggdrasilNetstack)(nil)
+
+// Service implements TUN-less NAT64: it terminates IPv6 traffic addressed to
+// the pool6::/96 subnet inside the gVisor netstack and re-originates it over
+// real IPv4 OS sockets.
 //
 //	TCP  — handled via gVisor's tcp.NewForwarder (promiscuous mode is enabled
 //	       on the gVisor stack so it accepts pool6::IPv4 destinations).
-//	UDP  — intercepted at NIC level before gVisor, replies are raw IPv6 packets
-//	       written directly to ipv6rwc.
-//	ICMP — Echo Request/Reply only (RFC 6146 §3.1), intercepted at the same
-//	       NIC level as UDP and translated via a single shared raw ICMPv4
-//	       socket. Requires CAP_NET_RAW; if unavailable, ICMP translation is
-//	       silently disabled (TCP/UDP are unaffected).
+//	UDP  — handled via gVisor's udp.NewForwarder the same way; gVisor owns
+//	       checksums, demuxing, IPv6 reassembly and outbound fragmentation,
+//	       so fragmented datagrams and oversized replies work end-to-end.
+//	ICMP — Echo Request/Reply only (RFC 6146 §3.1), intercepted at the NIC
+//	       level before gVisor (raw packets injected via ipv6rwc) and
+//	       translated via a single shared raw ICMPv4 socket. Requires
+//	       CAP_NET_RAW; if unavailable, ICMP translation is silently disabled
+//	       (TCP/UDP are unaffected).
 type Service struct {
 	pool6Net *net.IPNet
 	settings atomic.Pointer[nat64Settings]
 
-	ns       *netstack.YggdrasilNetstack
+	ns       NetStack
 	sessions sync.Map // sessionKey → *udpSession
 
 	icmpConn     *icmp.PacketConn
@@ -52,7 +70,7 @@ type nat64Settings struct {
 // NewService creates a NAT64 Service from configuration.
 // allowedSources is the shared AllowedSources list from AppConfig.
 // ignoredDstSubnets is the shared IgnoredDstSubnets list from AppConfig.
-func NewService(cfg config.NAT64Config, allowedSources []string, ignoredDstSubnets []string, ns *netstack.YggdrasilNetstack) (*Service, error) {
+func NewService(cfg config.NAT64Config, allowedSources []string, ignoredDstSubnets []string, ns NetStack) (*Service, error) {
 	_, pool6Net, err := net.ParseCIDR(cfg.Pool6)
 	if err != nil {
 		return nil, fmt.Errorf("nat64: invalid pool6 %q: %w", cfg.Pool6, err)
@@ -109,8 +127,8 @@ func (s *Service) isIgnoredDst(ip net.IP) bool {
 }
 
 // Start activates the NAT64 service:
-//  1. Installs a gVisor TCP forwarder (handles pool6 TCP SYNs).
-//  2. Registers the combined UDP+ICMP packet interceptor on the NIC read path.
+//  1. Installs gVisor TCP and UDP forwarders (handle pool6 flows).
+//  2. Registers the ICMPv6 packet interceptor on the NIC read path.
 //  3. Opens a shared raw ICMPv4 socket (best-effort) and starts its reply loop.
 //  4. Starts the session idle-cleanup goroutine.
 func (s *Service) Start(ctx context.Context, logger *log.Logger) {
@@ -120,7 +138,13 @@ func (s *Service) Start(ctx context.Context, logger *log.Logger) {
 	})
 	s.ns.Stack().SetTransportProtocolHandler(tcp.ProtocolNumber, tcpFwd.HandlePacket)
 
-	// ── UDP + ICMP: NIC-level packet interceptor ─────────────────────────────
+	// ── UDP: gVisor udp.NewForwarder ─────────────────────────────────────────
+	udpFwd := udp.NewForwarder(s.ns.Stack(), func(req *udp.ForwarderRequest) bool {
+		return s.handleUDPForward(req, logger)
+	})
+	s.ns.Stack().SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd.HandlePacket)
+
+	// ── ICMP: NIC-level packet interceptor ───────────────────────────────────
 	s.ns.SetPacketInterceptor(s.interceptPacket)
 
 	// ── ICMP: shared raw socket for Echo Request/Reply translation ──────────
@@ -143,20 +167,18 @@ func (s *Service) Start(ctx context.Context, logger *log.Logger) {
 }
 
 // interceptPacket dispatches a raw IPv6 packet from the NIC read path to the
-// UDP or ICMP interceptor based on the IPv6 next-header field. Returning
-// true means the packet was consumed and must not reach gVisor.
+// ICMPv6 interceptor. Returning true means the packet was consumed and must
+// not reach gVisor. UDP is no longer handled here: it goes through gVisor's
+// udp.Forwarder (registered in Start), which gives the stack ownership of
+// checksums, demuxing and fragmentation for that protocol.
 func (s *Service) interceptPacket(pkt []byte) bool {
 	if len(pkt) < 40 || pkt[0]>>4 != 6 {
 		return false
 	}
-	switch pkt[6] {
-	case 17: // UDP
-		return s.interceptUDPPacket(pkt)
-	case 58: // ICMPv6
+	if pkt[6] == 58 { // ICMPv6
 		return s.interceptICMPPacket(pkt)
-	default:
-		return false
 	}
+	return false
 }
 
 // cleanupSessions periodically expires idle UDP sessions and ICMP echo
@@ -175,9 +197,14 @@ func (s *Service) cleanupSessions(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			// Close all open outbound UDP connections.
+			// Close both legs of every open UDP session; the relay loops exit
+			// on the closed conns and delete their map entries themselves.
 			s.sessions.Range(func(_, v any) bool {
-				v.(*udpSession).outConn.Close()
+				sess := v.(*udpSession)
+				sess.conn6.Close()
+				if sess.outConn != nil {
+					sess.outConn.Close()
+				}
 				return true
 			})
 			if s.icmpConn != nil {
@@ -190,8 +217,12 @@ func (s *Service) cleanupSessions(ctx context.Context) {
 				cutoff := time.Now().Add(-t).UnixNano()
 				s.sessions.Range(func(k, v any) bool {
 					sess := v.(*udpSession)
-					if sess.lastSeenNs < cutoff {
-						// Force-close the outConn; udpReplyLoop will exit and delete the key.
+					if atomic.LoadInt64(&sess.lastSeenNs) < cutoff {
+						// Close the gVisor endpoint (unregisters it from the
+						// demuxer, so later datagrams of this tuple start a
+						// fresh session) and the udp4 socket; both relay
+						// loops then exit and delete the key.
+						sess.conn6.Close()
 						sess.outConn.Close()
 					}
 					return true
@@ -199,7 +230,7 @@ func (s *Service) cleanupSessions(ctx context.Context) {
 			}
 			icmpCutoff := time.Now().Add(-icmpSessionTimeout).UnixNano()
 			s.icmpSessions.Range(func(k, v any) bool {
-				if v.(*icmpSession).lastSeenNs < icmpCutoff {
+				if atomic.LoadInt64(&v.(*icmpSession).lastSeenNs) < icmpCutoff {
 					s.icmpSessions.Delete(k)
 				}
 				return true

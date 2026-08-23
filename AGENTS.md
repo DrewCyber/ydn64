@@ -285,11 +285,24 @@ Read this before touching `src/netstack/netstack.go` or
   `transport/tcp/accept.go` (`performHandshake`) make the blocking/timeout
   behavior explicit.
 - `SetPacketInterceptor` on the netstack only supports **one** registered
-  callback. NAT64's UDP and ICMP paths share a single dispatcher
-  (`Service.interceptPacket` in `src/nat64/service.go`), which inspects the
-  IPv6 next-header byte (`pkt[6]`) and routes to `interceptUDPPacket` (17) or
-  `interceptICMPPacket` (58). Don't try to register a second interceptor —
-  extend the dispatcher instead.
+  callback. NAT64's interceptor (`Service.interceptPacket` in
+  `src/nat64/service.go`) handles **ICMPv6 only** (next-header byte
+  `pkt[6] == 58` → `interceptICMPPacket`). UDP is *not* intercepted anymore:
+  it goes through gVisor's `udp.NewForwarder` registered on the transport
+  handler in `Service.Start`, which gives gVisor ownership of checksums,
+  demuxing, reassembly and outbound fragmentation for that protocol. Don't
+  try to register a second interceptor — extend the ICMP dispatcher instead.
+- **UDP forwarder demux order matters**: gVisor's transport demuxer checks
+  registered endpoints BEFORE calling the transport-protocol handler
+  (`transport_demuxer.go: deliverPacket`). So only the *first* datagram of a
+  flow reaches `handleUDPForward`; once `ForwarderRequest.CreateEndpoint`
+  registers the connected endpoint, later datagrams of the tuple are delivered
+  straight into it and are read off the `gonet.UDPConn`. The `sessions`
+  sync.Map is bookkeeping only (idle expiry + reply-loop wiring), never a demux
+  table. Also note `udp.ForwarderRequest` has **no payload accessor and no
+  Complete()**: dropping a request without CreateEndpoint just abandons its
+  cloned PacketBuffer to the GC (safe — chunks are pooled Go objects), which is
+  why policy-filtered flows must be dropped before endpoint creation, not after.
 - **Raw ICMPv4 sockets need `CAP_NET_RAW`**, and it is **not** granted by
   podman's default capability set — `icmp.ListenPacket("ip4:icmp", "0.0.0.0")`
   fails with `operation not permitted` unless the container is started with
