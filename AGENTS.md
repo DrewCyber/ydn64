@@ -294,7 +294,11 @@ Read this before touching `src/netstack/netstack.go` or
   it goes through gVisor's `udp.NewForwarder` registered on the transport
   handler in `Service.Start`, which gives gVisor ownership of checksums,
   demuxing, reassembly and outbound fragmentation for that protocol. Don't
-  try to register a second interceptor — extend the ICMP dispatcher instead.
+  try to register a second interceptor — for observation use the packet-tap
+  pattern instead (`src/netstack/tap.go`, the reference implementation behind
+  `YDN64_DEBUG_PCAP`), which registers a `stack.PacketEndpoint` as an
+  ETH_P_ALL-style listener; arbitrarily many of those can coexist with the
+  interceptor.
 - **UDP forwarder demux order matters**: gVisor's transport demuxer checks
   registered endpoints BEFORE calling the transport-protocol handler
   (`transport_demuxer.go: deliverPacket`). So only the *first* datagram of a

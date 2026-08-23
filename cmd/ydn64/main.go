@@ -277,6 +277,19 @@ func main() {
 		logger.Fatalf("failed to create netstack: %v", err)
 	}
 
+	// ── Debug packet tap (YDN64_DEBUG_PCAP=path) ─────────────────────────────
+	// Inbound-only libpcap capture of what gVisor delivers on the NIC —
+	// see netstack.PacketTap for exactly what that includes. Strictly
+	// optional diagnostics; never enabled by default.
+	var packetTap *netstack.PacketTap
+	if path := os.Getenv("YDN64_DEBUG_PCAP"); path != "" {
+		if packetTap, err = netstack.StartDebugPacketTap(ns.Stack(), path); err != nil {
+			logger.Warnf("debug pcap tap disabled: %v", err)
+		} else {
+			logger.Warnf("debug pcap tap active: capturing inbound IPv6 to %s", path)
+		}
+	}
+
 	// ── NAT64 service ─────────────────────────────────────────────────────────
 
 	var nat64Svc *nat64.Service
@@ -320,6 +333,9 @@ func main() {
 
 	// Ordered shutdown: services → multicast → admin → core.
 	// DNS64 and NAT64 stop via context cancellation already in flight.
+	if packetTap != nil {
+		packetTap.Close()
+	}
 	if n.multicast != nil {
 		if err := n.multicast.Stop(); err != nil {
 			logger.Warnf("multicast stop: %v", err)

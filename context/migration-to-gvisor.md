@@ -16,7 +16,7 @@ All API names cited below were verified against the exact vendored version.
 | T2  | TCP keepalive / user-timeout on NAT64 proxied connections    | P1       | —          | DONE   |
 | T3  | Integration verification + fragmented-UDP test case          | P1       | T1         | DONE   |
 | T4  | Stack & per-flow stats exposure                              | P2       | —          | DONE   |
-| T5  | Packet tap (multi-listener) via `RegisterPacketEndpoint`     | P2       | —          |        |
+| T5  | Packet tap (multi-listener) via `RegisterPacketEndpoint`     | P2       | —          | DONE   |
 | T6  | Spike: congestion control / MTU probing tunables             | P3       | —          |        |
 | T7  | Spike: IPTables/nftables-based `AllowedSources`              | P3       | —          |        |
 
@@ -658,3 +658,55 @@ Tests added (`src/nat64/stats_test.go`):
 Verification: build/vet clean; `go test -race ./...` clean; full podman suite
 green; SIGHUP dump + periodic lines confirmed in `.run/ydn64.log` with
 plausible counter movement during case runs.
+
+### T5 — DONE (2026-08-23)
+
+Deviations from the task text (verified against the vendored source, several
+of the task's API claims were stale):
+
+- **`stack.PacketEndpoint` is a one-method interface** in this version:
+  `HandlePacket(nicID, netProto, pkt)` — no embedded LinkEndpoint methods to
+  stub (`pkg/tcpip/stack/registration.go:164`).
+- **Packet endpoints only fire when `NICOptions.DeliverLinkPackets` is set**
+  at `CreateNICWithOptions` time. Production now sets it in
+  `NewYggdrasilNIC`; with no endpoints registered the cost is negligible.
+- **Direction capture depends on registration flavor.** Matching Linux
+  AF_PACKET semantics, `nic.DeliverLinkPacket` skips protocol-specific
+  endpoints for outbound packets (`PktType == PacketOutgoing`), while an
+  `header.EthernetProtocolAll` (ETH_P_ALL) registration receives every packet
+  exactly once in each direction. The tap therefore registers as ETH_P_ALL —
+  the task's suggested IPv6-only registration would have captured inbound
+  only.
+- **The tap point is BEFORE destination matching and BEFORE egress
+  fragmentation**: promiscuous mode is not required for capture, and oversized
+  egress datagrams appear as their post-fragmentation pieces (ipv6
+  handleFragments feeds fragments through nic.WritePacket individually).
+- Interceptor relationship documented in code: packets consumed by
+  `nat64.Service.interceptPacket` (ICMPv6 echoes) never reach gVisor and are
+  invisible to the tap; forwarded TCP/UDP and DNS64 traffic are visible.
+
+Implementation:
+
+- `src/netstack/pcap.go` — dependency-free libpcap writer (LE magic,
+  v2.4, LINKTYPE_RAW=101), mutex-guarded.
+- `src/netstack/tap.go` — `PacketTap`: copies packet bytes off gVisor's
+  PacketBuffer in `HandlePacket`, queues to a bounded channel (drop-on-full;
+  a debug tap must never block the data path), background writer goroutine;
+  `Close` unregisters, drains, closes. Env-gated via `YDN64_DEBUG_PCAP=path`
+  in main.go; failure is a warning, never fatal.
+
+Tests added:
+
+- `src/netstack/pcap_test.go` — byte-level global-header and record-format
+  validation, multi-record file layout.
+- `src/netstack/tap_test.go` — live mini-stack: two inbound injections plus
+  one real UDP-endpoint egress write all appear in the pcap; after Close the
+  tap is unregistered (no further records, no panic on racing delivery).
+
+Verification: build/vet clean; `go test -race ./...` clean; full podman suite
+green (one run hit external-dependency flake on cases 03/04 — real-world
+Alfis `.ygg` resolver transiently unreachable; resolved without changes).
+End-to-end: container A restarted with `YDN64_DEBUG_PCAP=/work/tap.pcap`,
+case 08 traffic driven from B, resulting 13 KB capture parsed on the host:
+valid pcap header, 14 IPv6 records including port-53 DNS exchanges and
+≤1496-byte gVisor egress fragments of the 4000-byte reply.

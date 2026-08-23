@@ -46,7 +46,14 @@ func (s *YggdrasilNetstack) NewYggdrasilNIC(ygg *core.Core, ifMTU uint64) tcpip.
 		ctrlPackets: make(chan *stack.PacketBuffer, 100),
 	}
 
-	if err := s.stack.CreateNIC(1, nic); err != nil {
+	// DeliverLinkPackets makes the NIC hand raw packets — both inbound
+	// deliveries and egress writes — to registered stack.PacketEndpoints,
+	// which the optional debug packet tap (YDN64_DEBUG_PCAP, see PacketTap)
+	// requires. With no packet endpoints registered the cost is one empty-list
+	// check per packet, so leaving it always-on is harmless.
+	if err := s.stack.CreateNICWithOptions(1, nic, stack.NICOptions{
+		DeliverLinkPackets: true,
+	}); err != nil {
 		return err
 	}
 
