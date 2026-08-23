@@ -388,6 +388,10 @@ func reloadConfig(
 
 	if nat64Svc != nil {
 		nat64Svc.Reload(newNat64Cfg, appCfg.AllowedSources, appCfg.IgnoredDstSubnets)
+		// Immediate gVisor stack-stats dump alongside the reload — handy for
+		// correlating traffic with a config change without waiting for the
+		// next 60s tick (only meaningful at -loglevel debug).
+		nat64Svc.DumpStats(logger)
 	}
 	if dns64Svc != nil {
 		if err := dns64Svc.Reload(newDNS64Cfg, appCfg.AllowedSources, appCfg.IgnoredDstSubnets); err != nil {

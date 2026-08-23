@@ -55,6 +55,11 @@ type Service struct {
 	icmpConn     *icmp.PacketConn
 	icmpSessions sync.Map // icmpSessionKey → *icmpSession
 	icmpClosed   atomic.Bool
+
+	// statsMu guards lastStatSnap, shared by the periodic stats loop and
+	// on-demand dumps (SIGHUP) so their lines partition time cleanly.
+	statsMu      sync.Mutex
+	lastStatSnap statSnapshot
 }
 
 // nat64Settings holds the subset of NAT64 configuration that can be changed
@@ -160,6 +165,9 @@ func (s *Service) Start(ctx context.Context, logger *log.Logger) {
 
 	// ── Session cleanup goroutine ────────────────────────────────────────────
 	go s.cleanupSessions(ctx)
+
+	// ── Periodic stack-statistics logger ─────────────────────────────────────
+	go s.statsLoop(ctx, logger, statsInterval)
 
 	cur := s.settings.Load()
 	logger.Printf("NAT64 started  pool6=%s  udp_timeout=%s  sources=%v  icmp=%v",

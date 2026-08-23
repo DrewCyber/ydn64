@@ -15,7 +15,7 @@ All API names cited below were verified against the exact vendored version.
 | T1  | Migrate NAT64 UDP to gVisor `udp.NewForwarder`               | P0       | —          | DONE   |
 | T2  | TCP keepalive / user-timeout on NAT64 proxied connections    | P1       | —          | DONE   |
 | T3  | Integration verification + fragmented-UDP test case          | P1       | T1         | DONE   |
-| T4  | Stack & per-flow stats exposure                              | P2       | —          |        |
+| T4  | Stack & per-flow stats exposure                              | P2       | —          | DONE   |
 | T5  | Packet tap (multi-listener) via `RegisterPacketEndpoint`     | P2       | —          |        |
 | T6  | Spike: congestion control / MTU probing tunables             | P3       | —          |        |
 | T7  | Spike: IPTables/nftables-based `AllowedSources`              | P3       | —          |        |
@@ -619,3 +619,42 @@ IfMTU was never read; harness section documents udpecho, the 1500 MTU and the
 empty IgnoredDstSubnets; stale restart-flake notes replaced with the current
 SIGHUP-reload reality), RFCs.txt unchanged this round (§3.4 wording already
 updated by T1).
+
+### T4 — DONE (2026-08-23)
+
+Implementation notes:
+
+- `src/nat64/stats.go`: `statSnapshot` copies the interesting counters
+  (`tcpip.Stack().Stats()`); `statsLoop` ticks every 60s on the service ctx
+  and logs ONE compact line at Debug level via the injected logger, prefix
+  `netstack stats:`. Deltas for counters, absolute values for gauges
+  (`tcpEst`, `sessUdp`, `sessIcmp`). Counters covered: ip rx/tx; tcp
+  active/passive openings, established gauge, valid segs rx, segs tx,
+  resets sent, retransmits, established-timed-out (keepalive/user-timeout
+  aborts from T2 are visible here); udp rx/tx/unknown-port/buffer-errors;
+  icmpv6 echo request received / echo reply sent.
+- **API correction vs task text**: `tcpip.Stats` has no top-level `ICMPv6`
+  field in this vendored version — ICMP counters live under
+  `Stats.ICMP.V6` (`ICMPStats{V4, V6}`); `Stack.Stats()` returns a VALUE not
+  a pointer.
+- SIGHUP dump implemented (step 2): `Service.DumpStats` shares the delta
+  baseline with the periodic loop under a mutex, so reload-triggered lines
+  and ticker lines partition time without double-counting. Wired into
+  `reloadConfig` after a successful NAT64 reload.
+
+Tests added (`src/nat64/stats_test.go`):
+
+- `TestTakeStatSnapshot` — every tracked counter read off a populated
+  tcpip.Stats.
+- `TestFormatStatsDelta` — exact delta/gauge semantics in the output line
+  (unchanged counter → 0, gauge absolute, session counts included).
+- `TestCountSyncMap` — trivial helper coverage.
+- `TestStatsLoopLogsDeltas` — real loop against a live gVisor stack with
+  20ms interval: ≥2 well-formed debug lines, then one UDP relay exchange and
+  a subsequent tick whose `udpRx` delta is positive. Uses a mutex-guarded
+  buffer because gologme writes from the loop goroutine while the test reads
+  (found by -race).
+
+Verification: build/vet clean; `go test -race ./...` clean; full podman suite
+green; SIGHUP dump + periodic lines confirmed in `.run/ydn64.log` with
+plausible counter movement during case runs.
