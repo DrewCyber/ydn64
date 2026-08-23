@@ -58,6 +58,14 @@ values fall back to these defaults:
 | `Dns64MaxCacheEntries` | 4096 | expired entries purged, else random eviction | yes |
 | `Dns64MaxConcurrentQueries` | 512 | excess UDP queries → SERVFAIL, TCP conns closed | no — restart |
 
+An **empty `AllowedSources`** is accepted but denies every client: NAT64 and
+DNS64 log a loud warning at startup and silently drop all traffic. If clients
+get no answers at all, check `AllowedSources` first. Forwarders
+(`Dns64Default`, zone `forwarder`) must be in `host:port` form with a numeric
+port, `Nat64Pool` must be a `/96`, and zone `prefix` values must be `/96`
+networks (last four bytes zero) — misformatted values are rejected at startup
+instead of misbehaving silently.
+
 ## 3. Run
 
 ```sh

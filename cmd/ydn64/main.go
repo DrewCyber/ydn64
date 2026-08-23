@@ -183,6 +183,15 @@ func main() {
 		logger.Infof("YDN64_ALLOWED_SOURCES override: %d entr(y/ies)", len(appCfg.AllowedSources))
 	}
 
+	// An empty AllowedSources is valid but means "deny everything": NAT64
+	// and DNS64 silently drop all traffic from every source. That's almost
+	// always a misconfiguration rather than intent, so say so loudly — at
+	// default log level, not buried at debug.
+	if len(appCfg.AllowedSources) == 0 {
+		logger.Warnf("AllowedSources is EMPTY: NAT64 and DNS64 will deny EVERY source. " +
+			"Add your clients' Yggdrasil addresses or subnets to AllowedSources (see README, section Configuration).")
+	}
+
 	// ── Start yggdrasil core ─────────────────────────────────────────────────
 
 	n := &node{}

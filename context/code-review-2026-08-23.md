@@ -97,6 +97,25 @@ Severity: **P0** fix now · **P1** fix soon · **P2** should fix · **P3** polis
     (end-to-end eviction through the synthetic stack, drop-when-unbounded-
     impossible, TCP shed), `src/dns64/shed_test.go` (slot semaphore +
     SERVFAIL shape), `cache_test.go` capacity/eviction/qtype-key tests.
+- **[2026-08-23] R9 fixed** in `src/config/config.go` `Validate()` (applies
+  to both startup and SIGHUP reloads, which go through `config.Load`):
+  - `Nat64Pool` must be a `/96` — a hand-edited /64 previously misbehaved
+    silently because embedded-v4 extraction, synthesis and reverse-PTR all
+    hard-code the well-known format (variable-length RFC 6052 prefixes
+    remain tracked as a deviation in RFCs.txt).
+  - Zone `prefix` must be an IPv6 address whose last four bytes are zero
+    (a true /96 network): synthesis overwrites those bytes with the
+    embedded IPv4, so host bits set there would silently produce garbage.
+  - Forwarders (`Dns64Default`, zone `forwarder`) must be `host:port` with
+    a numeric port in 1–65535; empty-host/missing-port/non-numeric/out-of-
+    range are rejected at load. Hostnames stay allowed for the OS-dialled
+    path; Yggdrasil-native forwarders must remain numeric IPv6 literals.
+  - An empty `AllowedSources` (silent deny-all) now logs a loud warning at
+    startup at default log level (`cmd/ydn64/main.go`, after env-var
+    overrides so env-only configs are covered too), plus a README note.
+  Covered by new tests incl. `TestGenconfOutputPassesValidation`, which
+  round-trips `-genconf` output through hjson + `Validate()` to guard
+  against template drift.
 
 ---
 
@@ -132,16 +151,12 @@ deferred EIM/BIB work (see RFCs.txt RFC 6146 §3.1).
 
 ### P2
 
-#### R9 · Config validation gaps (silent misconfiguration at runtime)
-- `Nat64Pool` CIDR length not enforced — everything hard-codes /96
-  (embedded-v4 extraction at byte 12, synthesis, reversePTR); a hand-edited
-  /64 pool misbehaves with zero errors. Enforce /96 (or implement RFC 6052
-  variable lengths — see RFCs.txt RFC 6052).
-- Zone `prefix` accepted as any IPv6 address; same /96 requirement applies.
-- Forwarders (`Dns64Default`, zone `forwarder`) never format-checked — parse
-  `host:port` at load; reject empty default when DNS64 enabled.
-- Empty `AllowedSources` = silent deny-all, logged only at Debug. Warn loudly
-  at startup; add a troubleshooting note in README.
+#### R9 · ~~Config validation gaps (silent misconfiguration at runtime)~~ — FIXED 2026-08-23 (see §1)
+
+Previously open: `Nat64Pool` CIDR length unenforced, zone `prefix` accepted
+any IPv6 address, forwarders never format-checked, empty `AllowedSources`
+silent deny-all logged only at Debug. All four closed; see §1 for details.
+The RFC 6052 variable-length alternative remains tracked in RFCs.txt.
 
 #### R10 · EDNS(0) deviations from RFC 6891
 `server.go`: non-EDNS clients get up-to-1232-byte responses (classic limit is
@@ -230,7 +245,7 @@ relaying to the v4 internet. Cheap to add using the existing
 | 2 | ~~R2 (TXID)~~ (done, commit e4fa656) | ~10 lines, closes the top security hole | small |
 | 3 | ~~R7 + lastSeenNs-style mechanical races~~ (done; R7 publish order + atomic lastSeenNs in tree) | trivial, removes all known races | small |
 | 4 | R4 staged (~~cache caps → semaphores → session caps~~ done 2026-08-23; per-source token buckets open) + ~~R4b~~ (TTL semantics done 2026-08-23) | biggest stability win under adversarial load | medium |
-| 5 | R9 (/96 + forwarder validation + empty-allowlist warning) | silent misconfigs become startup errors | small |
+| 5 | ~~R9 (/96 + forwarder validation + empty-allowlist warning)~~ (done 2026-08-23) | silent misconfigs become startup errors | small |
 | 6 | R10 (EDNS normalisation + real-function test) | interop correctness | small |
 | 7 | R5 (ICMP ID rewrite), R16 (ICMP-path validation), R11/R12 | robustness | medium |
 | 8 | R13–R15, R17, R18 | hygiene sweep | medium |

@@ -222,7 +222,8 @@ func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string, peers, allowed
 	sb.WriteString("  Nat64Enable: true\n\n")
 
 	sb.WriteString("  # NAT64 prefix to use for synthesising IPv6 addresses from IPv4 addresses.\n")
-	sb.WriteString("  # Pre-generated from the private key. Must be a /96 prefix.\n")
+	sb.WriteString("  # Pre-generated from the private key. Must be a /96 prefix; other\n")
+	sb.WriteString("  # prefix lengths are rejected at startup.\n")
 	sb.WriteString(fmt.Sprintf("  Nat64Pool: %q\n\n", pool6CIDR))
 
 	sb.WriteString("  # Idle timeout in seconds before a UDP NAT64 session is expired.\n")
@@ -268,6 +269,8 @@ func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string, peers, allowed
 
 	sb.WriteString("  Dns64Zones: [\n")
 	sb.WriteString("    # Default zone: synthesise AAAA records from A records using the NAT64 prefix.\n")
+	sb.WriteString("    # A zone \"prefix\" must be a /96 network written out in full (its last\n")
+	sb.WriteString("    # four bytes zero); forwarders must be \"host:port\" with a numeric port.\n")
 	sb.WriteString("    {\n")
 	sb.WriteString("      domains: [\".\"]\n")
 	sb.WriteString("      return-ipv4-addresses: false\n")

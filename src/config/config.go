@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/hjson/hjson-go/v4"
@@ -213,8 +214,16 @@ func (c *AppConfig) Validate() error {
 		if c.Nat64Pool == "" {
 			return fmt.Errorf("Nat64Pool is required when Nat64Enable = true")
 		}
-		if _, _, err := net.ParseCIDR(c.Nat64Pool); err != nil {
+		_, ipnet, err := net.ParseCIDR(c.Nat64Pool)
+		if err != nil {
 			return fmt.Errorf("Nat64Pool %q is not a valid CIDR: %w", c.Nat64Pool, err)
+		}
+		// Everything downstream hard-codes the well-known prefix format:
+		// embedded-v4 extraction at byte 12, AAAA synthesis and PTR
+		// generation all assume exactly 96 prefix bits. A hand-edited /64
+		// would misbehave silently, so reject anything else up front.
+		if ones, _ := ipnet.Mask.Size(); ones != 96 {
+			return fmt.Errorf("Nat64Pool %q must be a /96 prefix (got /%d); variable-length RFC 6052 prefixes are not supported", c.Nat64Pool, ones)
 		}
 		if c.Nat64UdpTimeout <= 0 {
 			c.Nat64UdpTimeout = 300
@@ -240,6 +249,9 @@ func (c *AppConfig) Validate() error {
 		if ia != "ignore" && ia != "process" && ia != "discard" {
 			return fmt.Errorf(`Dns64InvalidAddress must be "ignore", "process", or "discard", got %q`, c.Dns64InvalidAddress)
 		}
+		if err := validateForwarder("Dns64Default", c.Dns64Default); err != nil {
+			return err
+		}
 		for i, zone := range c.Dns64Zones {
 			if zone.Prefix != "" && zone.ReturnIPv6Addresses {
 				return fmt.Errorf("Dns64Zones[%d]: \"prefix\" and \"return-ipv6-addresses: true\" are mutually exclusive", i)
@@ -247,8 +259,26 @@ func (c *AppConfig) Validate() error {
 			if len(zone.Domains) == 0 {
 				return fmt.Errorf("Dns64Zones[%d]: \"domains\" list is required", i)
 			}
-			if zone.Prefix != "" && net.ParseIP(zone.Prefix) == nil {
-				return fmt.Errorf("Dns64Zones[%d]: \"prefix\" %q is not a valid IPv6 address", i, zone.Prefix)
+			if zone.Prefix != "" {
+				ip := net.ParseIP(zone.Prefix)
+				switch {
+				case ip == nil:
+					return fmt.Errorf("Dns64Zones[%d]: \"prefix\" %q is not a valid IPv6 address", i, zone.Prefix)
+				case ip.To4() != nil:
+					return fmt.Errorf("Dns64Zones[%d]: \"prefix\" %q must be an IPv6 address", i, zone.Prefix)
+				}
+				// Synthesis overwrites the last four bytes with the embedded
+				// IPv4 address (and PTR matching compares the first twelve),
+				// so a prefix with any of those bits set would silently
+				// produce garbage — require a true /96 network up front.
+				if p := ip.To16(); !bytes.Equal(p[12:], make([]byte, 4)) {
+					return fmt.Errorf("Dns64Zones[%d]: \"prefix\" %q must be a /96 network (its last four bytes must be zero)", i, zone.Prefix)
+				}
+			}
+			if zone.Forwarder != "" {
+				if err := validateForwarder(fmt.Sprintf("Dns64Zones[%d].forwarder", i), zone.Forwarder); err != nil {
+					return err
+				}
 			}
 		}
 		if c.Dns64CacheExpiration <= 0 {
@@ -265,5 +295,24 @@ func (c *AppConfig) Validate() error {
 		}
 	}
 
+	return nil
+}
+
+// validateForwarder checks that a forwarder address has "host:port"
+// structure with a numeric port in range. The host may be an IP literal or
+// a hostname; note that Yggdrasil-native (200::/7) forwarders only work as
+// numeric IPv6 literals, since they dial through the embedded netstack.
+func validateForwarder(name, addr string) error {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("%s %q is not in host:port form: %v", name, addr, err)
+	}
+	if host == "" {
+		return fmt.Errorf("%s %q has an empty host", name, addr)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("%s %q has an invalid port %q (want 1-65535)", name, addr, portStr)
+	}
 	return nil
 }
