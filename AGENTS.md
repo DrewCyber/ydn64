@@ -167,9 +167,10 @@ only the mechanics that matter when changing code:
 - [sighup-reload.md](context/sighup-reload.md) — design note for the SIGHUP
   live config reload path.
 - [dns64-parameters.txt](context/dns64-parameters.txt) — DNS64 parameter notes.
-- Dated snapshots (`code-audit-*`, `code-review-*`, `rfc-conformance-*`) are
-  point-in-time review artifacts; they describe the code as of their date and
-  may be stale.
+- [code-review-2026-08-23.md](context/code-review-2026-08-23.md) — consolidated
+  open engineering findings (races, CI, resource bounds, validation gaps);
+  re-verified after the 2026-08 gVisor migration. RFC-status items are NOT
+  tracked there — see RFCs.txt above.
 
 
 ## Changelog
@@ -183,6 +184,9 @@ one should be added), and add it under the `## [Unreleased]` heading.
 ## Conventions
 
 - Go module: `github.com/DrewCyber/ydn64`, Go 1.25.5.
+- **Licence is 0BSD**: GPL-3.0 code must never be copied, even in fragments;
+  for Apache-2.0 references (e.g. CoreDNS), read the algorithm and
+  reimplement rather than vendor, so the tree stays uniformly 0BSD.
 - Config format is **HJSON** (`github.com/hjson/hjson-go/v4`), not JSON/TOML/YAML — comments in config files are load-bearing documentation, preserve them when regenerating templates.
 - Config keys use `PascalCase` (matching upstream Yggdrasil's own config style), not `snake_case` or `camelCase`.
 - Logging via `github.com/gologme/log`, levels: error/warn/info/debug/trace, set with `-loglevel`.

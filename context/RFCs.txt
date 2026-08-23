@@ -4,8 +4,9 @@ ydn64 — RFC REFERENCE LIST
 Authoritative list of the RFCs that ydn64's NAT64 and DNS64 implementations
 are measured against, with current implementation status.
 
-Last reviewed: 2026-08-19
-Full section-by-section assessment: tmp/rfc-conformance-2026-07-25.md
+Last reviewed: 2026-08-23 (post gVisor-migration re-check; the detailed
+2026-07-25 section-by-section assessment was merged into this file and
+deleted — this file is the single source of truth for RFC status)
 Documented deviations: README.md, "Standards conformance and deliberate deviations"
 
 DESIGN GOAL: ydn64 aims to work well for Yggdrasil clients, NOT to be a
@@ -29,19 +30,39 @@ RFC 6146 — Stateful NAT64: Network Address and Protocol Translation from
            IPv6 Clients to IPv4 Servers                            [PARTIAL]
     The primary NAT64 specification. Basic IPv6->IPv4 forwarding for TCP,
     UDP and ICMP Echo works. Outstanding:
-      - §3.5 / §5.4  drop inbound IPv6 with a source inside Pref64::/n [DONE]
+      - §3.5 / §5.4  drop inbound IPv6 with a source inside Pref64::/n
+                     (anti-hairpin loop): enforced on the TCP, UDP and ICMP
+                     paths                                          [DONE]
       - §3.4         fragment handling: TCP/UDP fragments are reassembled
                      by the gVisor netstack before translation and oversized
                      replies are fragmented by it on egress; the raw-socket
                      ICMP Echo path still only handles unfragmented
                      datagrams                                   [PARTIAL]
-      - §3.5.1 / §4  UDP session lifetime floor (UDP_MIN = 2 min,
-                     UDP_DEFAULT = 5 min); ydn64 defaults to 30 s      [DONE]
-      - §3.5.3 / §4  ICMP session lifetime (ICMP_DEFAULT = 60 s) and
-                     NAT-allocated ICMP Identifier                     [TODO]
-      - §5.3         resource limits / anti-DoS protection             [TODO]
+      - §3.5.1 / §4  UDP session lifetime floor (UDP_MIN = 2 min) and
+                     default (UDP_DEFAULT = 5 min): Nat64UdpTimeout
+                     defaults to 300 s and Validate() enforces >= 120 s [DONE]
+      - §3.5.3 / §4  ICMP session lifetime (ICMP_DEFAULT = 60 s; ydn64
+                     hardcodes 30 s) and NAT-allocated ICMP Identifier
+                     (client's Identifier is used verbatim, so replies can
+                     be hijacked across peers)                         [TODO]
+      - §5.3         resource limits / anti-DoS: no session caps or
+                     per-source quotas yet. Also a MAY worth a knob:
+                     udpReplyLoop refreshes lastSeen on every inbound v4
+                     datagram, exactly the keep-alive-attack behaviour the
+                     RFC warns about                                   [TODO]
       - §3.1 / §5.2  Binding Information Base -> Endpoint-Independent
                      Mapping (unblocks STUN/ICE/WebRTC)            [DEFERRED]
+                     Design sketch for when this is picked up:
+                     split sessions into a BIB keyed on
+                     (srcAddr6, srcPort) -> (hostV4, allocPort) plus a
+                     lifetime/session table; one UNCONNECTED
+                     net.ListenUDP per BIB entry (WriteTo/ReadFrom +
+                     demux inbound by real source) replaces DialUDP per
+                     destination; filtering becomes an explicit REQ-8
+                     knob; session caps MUST land together. No new
+                     privileges required. UDP-only EIM covers WebRTC/
+                     QUIC/WireGuard and is small; TCP EIM means
+                     abandoning the gVisor forwarder (Tier 4).
       - §3.5.2       TCP state machine                                  [N/A]
       - §3.8         hairpinning                                        [N/A]
 
@@ -53,11 +74,21 @@ RFC 6147 — DNS64: DNS Extensions for NAT from IPv6 Clients to IPv4 Servers
       - §5.1.5/5.1.7 preserve the CNAME chain; take the synthetic AAAA
                      owner name from the A record                      [DONE]
       - §5.1.7       synthetic TTL = min(A TTL, SOA TTL)               [DONE]
-      - §5.1.7       per-IPv4-range prefix selection (also blocks
-                     synthesis of RFC 1918 / link-local targets)       [DONE]
+      - §5.1.7       per-IPv4-range prefix selection: special-use IPv4
+                     ranges (RFC 1918, loopback, link-local, ...) are
+                     excluded from synthesis via IgnoredDstSubnets, but
+                     selecting a DIFFERENT configured prefix per IPv4
+                     range is not implemented (prefix is chosen per
+                     domain zone)                                   [PARTIAL]
       - §5.1         pass through non-IN qclass (no synthesis)         [DONE]
       - §5.1.4       special exclusion set for AAAA                    [TODO]
-      - §5.3.2/§5.4  pass through the authority + additional sections  [TODO]
+                     (the RFC-blessed way to express "drop AAAA my
+                     clients cannot reach"; could eventually subsume
+                     the return-ipv6-addresses zone flag, but that
+                     would be a breaking config change)
+      - §5.3.2/§5.4  pass through the authority + additional sections
+                     of the upstream response (makes SOA-based negative
+                     caching work downstream)                          [DONE]
       - §5.4         EDNS(0) handling and truncation / TC bit          [DONE]
       - §5.5         DNSSEC: honour CD=1&&DO=1, never assert AD        [TODO]
       - §5.1.1       synthesis when real AAAA exist              [DEVIATION]
@@ -68,7 +99,9 @@ RFC 6147 — DNS64: DNS Extensions for NAT from IPv6 Clients to IPv4 Servers
 RFC 6052 — IPv6 Addressing of IPv4/IPv6 Translators                [PARTIAL]
     Address embedding for both NAT64 and DNS64. ydn64 implements the /96
     case only; §2.2's /32, /40, /48, /56 and /64 formats are unimplemented
-    (the offsets are hardcoded to byte 12). ydn64 derives its Network-
+    (the offsets are hardcoded to byte 12). The full algorithm is small:
+    CoreDNS's dns64 plugin to6() is a readable reference (handles the u-byte
+    skip at byte 8; validate n%8==0, 32<=n<=96). ydn64 derives its Network-
     Specific Prefix from the node's own Yggdrasil /64, which satisfies
     §3.2's "own address space" requirement. The Well-Known Prefix
     64:ff9b::/96 is not supported as a fallback.
@@ -92,8 +125,15 @@ RFC 8200 — Internet Protocol, Version 6 (IPv6) Specification       [PARTIAL]
 
 RFC 4443 — ICMPv6 for the IPv6 Specification                       [PARTIAL]
     Echo Request/Reply (§4.1, §4.2) are handled correctly, checksum
-    included. Not generated: §3.1 Destination Unreachable, §3.2 Packet
-    Too Big (so PMTUD is unsupported).                                [TODO]
+    included.
+    §3.2 Packet Too Big: generated by the yggdrasil ipv6rwc layer when an
+    inbound frame exceeds the configured IfMTU (plumbed through since the
+    gVisor migration), so PMTUD works on the Yggdrasil-facing leg —
+    clients converge their path MTU after receiving it.
+    Still missing: §3.1 Destination Unreachable generation, and
+    translation of IPv4-side ICMP errors (incl. translating a v4 PTB
+    into a v6 PTB), so PMTUD toward IPv4 servers stays unsupported and
+    traceroute remains broken.                                        [TODO]
 
 
 B. NAT BEHAVIOURAL REQUIREMENTS — NORMATIVELY REFERENCED BY RFC 6146
@@ -104,7 +144,8 @@ actually live. They were absent from the earlier version of this list.
 RFC 4787 (BCP 127) — NAT Behavioral Requirements for Unicast UDP   [PARTIAL]
     REQ-1 Endpoint-Independent Mapping                            [DEFERRED]
     REQ-3 port parity / range preservation                            [TODO]
-    REQ-5 mapping timer >= 2 min, default >= 5 min                    [TODO]
+    REQ-5 mapping timer >= 2 min, default >= 5 min
+         (default 300 s, Validate() floor 120 s)                      [DONE]
     REQ-6 configurable timers                                         [DONE]
     REQ-8 filtering behaviour (currently address-and-port-dependent,
           i.e. stricter than RECOMMENDED)                       [DEVIATION]
@@ -147,15 +188,18 @@ RFC 6891 — Extension Mechanisms for DNS (EDNS(0))                  [PARTIAL]
       - EDNS(0) options (e.g., COOKIE, CLIENT-SUBNET)            [TODO]
       - DNSSEC support (DO bit, CD bit) — see RFC 6147 §5.5     [TODO]
 
-RFC 2308 — Negative Caching of DNS Queries (DNS NCACHE)               [TODO]
-    Source of the SOA TTL used by RFC 6147 §5.1.7's TTL rule. ydn64 drops
-    the authority section, so negative caching does not work downstream.
+RFC 2308 — Negative Caching of DNS Queries (DNS NCACHE)               [DONE]
+    Source of the SOA TTL used by RFC 6147 §5.1.7's TTL rule. The
+    authority section of upstream responses is now passed through, so
+    SOA-based negative caching works downstream.
 
 RFC 5452 — Measures for Making DNS More Resilient against Forged
            Answers                                                 [PARTIAL]
     Source port is randomised by the OS. §9.2 query-ID unpredictability
     is violated: the client's transaction ID is forwarded upstream
     verbatim.                                                         [TODO]
+    0x20 name randomisation is optional hardening; not
+    implemented.                                                      [TODO]
 
 RFC 7766 — DNS Transport over TCP - Implementation Requirements    [PARTIAL]
     §3 TCP support and §6.2.1 idle timeouts are implemented.          [DONE]
@@ -231,31 +275,3 @@ RFC 6384 — An FTP ALG for IPv6-to-IPv4 Translation                     [N/A]
 RFC 6219 — CERNET2 Stateful IVI Translation Design                     [N/A]
 RFC 7757 — Explicit Address Mappings for Stateless Translation         [N/A]
     Both apply to stateless/IVI variants; ydn64 is stateful.
-
-
-F. CORRECTIONS TO THE PREVIOUS VERSION OF THIS LIST
-----------------------------------------------------
-
-1. RFC 6145 was listed as a current specification. It was OBSOLETED by
-   RFC 7915 in 2016. RFC 6146 §3.7 still cites 6145 textually; read that
-   as 7915.
-
-2. The behavioural BCPs (section B above) were missing entirely. RFC 6146
-   references them normatively — RFC 6146 §5.2 makes Endpoint-Independent
-   Mapping a MUST by reference to RFC 4787, and RFC 6146 §4's protocol
-   constants come from RFC 5382 and RFC 5508.
-
-3. The DNS protocol RFCs (section C above) were missing entirely. RFC 6147
-   §5.4 requires the synthesised response to obey standard DNS rules,
-   which brings in RFC 1035 truncation, RFC 6891 EDNS(0), RFC 2308
-   negative caching and RFC 5452 forgery resistance.
-
-4. RFC 8200 and RFC 4443 were not listed. They carry concrete,
-   currently-violated requirements: the UDP zero-checksum rule
-   (RFC 8200 §8.1) and ICMPv6 error generation (RFC 4443 §3.1, §3.2).
-
-5. The earlier summary said the set to implement against is "RFC 6052,
-   RFC 6146, RFC 7915 and RFC 6147". For ydn64 specifically that is not
-   right: RFC 7915 is largely N/A (ydn64 does not translate headers),
-   while RFC 4787, RFC 5508, RFC 8200 and RFC 6891 all carry work that
-   affects real users.
