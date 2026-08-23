@@ -17,12 +17,19 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
 COPY src ./src
+COPY tools ./tools
+COPY LICENSE ./
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags "-s -w -X main.buildVersion=${VERSION}" -o /out/ydn64 ./cmd/ydn64
+# TARGETOS/TARGETARCH leak into RUN as env vars and would make "go run" build
+# the generator for the target platform; unset them so it runs natively.
+RUN env -u GOOS -u GOARCH go run ./tools/licenses -o /out/THIRD-PARTY-NOTICES.txt
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 COPY --from=build /out/ydn64 /usr/local/bin/ydn64
+COPY --from=build /out/THIRD-PARTY-NOTICES.txt /usr/local/share/doc/ydn64/THIRD-PARTY-NOTICES.txt
+COPY --from=build LICENSE /usr/local/share/doc/ydn64/LICENSE
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 

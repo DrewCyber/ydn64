@@ -37,6 +37,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
+          labels: |
+            org.opencontainers.image.licenses=0BSD
           tags: |
             type=semver,pattern={{raw}}
             type=raw,value=latest
@@ -113,13 +115,18 @@ jobs:
           mkdir -p dist
           go build -trimpath -ldflags "-s -w -X main.buildVersion=${{ github.ref_name }}" -o dist/${{ steps.vars.outputs.binary }} ./cmd/ydn64
 
+      - name: Collect licence files
+        run: |
+          cp LICENSE dist/LICENSE
+          go run ./tools/licenses -o dist/THIRD-PARTY-NOTICES.txt
+
       - name: Package
         run: |
           cd dist
           if [ "${{ matrix.goos }}" = "windows" ]; then
-            zip ${{ steps.vars.outputs.name }}.zip ${{ steps.vars.outputs.binary }}
+            zip ${{ steps.vars.outputs.name }}.zip ${{ steps.vars.outputs.binary }} LICENSE THIRD-PARTY-NOTICES.txt
           else
-            tar -czf ${{ steps.vars.outputs.name }}.tar.gz ${{ steps.vars.outputs.binary }}
+            tar -czf ${{ steps.vars.outputs.name }}.tar.gz ${{ steps.vars.outputs.binary }} LICENSE THIRD-PARTY-NOTICES.txt
           fi
 
       - name: Upload artifact

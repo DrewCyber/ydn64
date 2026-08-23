@@ -252,6 +252,16 @@ via a raw socket. There is no IP-header translation anywhere in the path.
   discovery (recent iOS/Android) must use RFC 7050 (`ipv4only.arpa`) or be
   configured manually.
 
+## Licence
+
+ydn64's own code is licensed under the [BSD Zero Clause License](LICENSE).
+The distributed binaries and container images bundle third-party Go modules,
+notably [gVisor](https://gvisor.dev) (Apache-2.0) and
+[yggdrasil-go](https://github.com/yggdrasil-network/yggdrasil-go) (LGPL-3.0);
+the full licence texts of every bundled component ship in
+`THIRD-PARTY-NOTICES.txt` inside each release archive (and at
+`/usr/local/share/doc/ydn64/` in the Docker image).
+
 ## More
 
 See [AGENTS.md](AGENTS.md) for detailed guidance on the codebase,
