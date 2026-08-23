@@ -82,13 +82,24 @@ both services (not duplicated per-service).
 
 `AdminListen` and `IfName` are always force-overridden to `"none"` in
 `main.go` regardless of what's in the config file — this app never uses an
-admin socket or a TUN interface by design. Because of that, both keys (plus
-`IfMTU`, which only affects a real TUN interface's MTU and is never read
-anywhere in this codebase) are intentionally omitted from the generated
-template (`src/config/generate.go`) and the checked-in sample
-[ydn64.conf](ydn64.conf) — they'd be dead/no-op if present. `ygconfig.NodeConfig`
-still recognizes them if an old config sets them explicitly (harmlessly
-overridden right after `Load`), but new configs shouldn't include them.
+admin socket or a TUN interface by design. Because of that, both keys are
+intentionally omitted from the generated template (`src/config/generate.go`)
+and the checked-in sample [ydn64.conf](ydn64.conf) — they'd be dead/no-op if
+present. `ygconfig.NodeConfig` still recognizes them if an old config sets
+them explicitly (harmlessly overridden right after `Load`), but new configs
+shouldn't include them.
+
+**`IfMTU` is the one TUN-related key that IS read**: it is passed to
+`netstack.CreateYdn64Netstack`, which applies it to the `ipv6rwc.ReadWriteCloser`
+via `SetMTU`. This matters because ipv6rwc defaults its internal MTU to a
+conservative **1280** and *enforces* it on the inbound path — frames larger
+than that are silently dropped with an ICMPv6 Packet Too Big reply — until
+someone calls `SetMTU`. A TUN-based node wires its TUN's MTU; ydn64 has no
+TUN, so without this plumbing clients with larger interface MTUs hit spurious
+PTB round-trips on their first big packet. The value also feeds gVisor's NIC
+MTU (egress segmentation for oversized UDP datagrams) and the NAT64 raw-packet
+buffer sizes. It's still omitted from generated configs (the upstream default
+65535 is fine), but don't remove the `CreateYdn64Netstack` parameter.
 
 When changing the config schema:
 - Add the field to `AppConfig` in [src/config/config.go](src/config/config.go)
@@ -200,49 +211,41 @@ cd test
   `.run/ydn64.log` (A's file-based service log), `.run/yggclient.log` (B's
   stdlib log, also in `podman logs`), `.run/ydn64.env` (shell-sourceable
   vars: `NODE_ADDR`, `DNS64_LISTEN_ADDR`, `NAT64_POOL_PREFIX`, ...).
+- The harness runs with a realistic **1500-byte IfMTU** on both nodes
+  (`test/gen -ifmtu`, default 1500) instead of yggdrasil's 65535 default, so
+  oversized-datagram paths (IPv6 fragmentation/reassembly through gVisor,
+  PMTUD interactions) are actually exercised — see
+  `test/cases/08_udp_fragmented_datagrams.sh`.
+- `test/tools/udpecho` is a test-only Go helper baked into BOTH container
+  images: a UDP echo server plus a one-shot client (`udpecho -once`). It
+  exists because busybox `nc` truncates UDP datagrams to a small fixed
+  receive buffer in both directions, far below the 1472-byte fragmentation
+  threshold. The harness config also empties `IgnoredDstSubnets` so cases can
+  target loopback-embedded IPv4 addresses inside A deterministically.
 - After any change to `src/`, rebuild the binary/image before retesting: the
   test images bake in the compiled binary, they don't mount source live.
-- Test cases restart the `A` container to exercise config-reload behavior
-  (see `test/cases/04_allowed_sources_config_change.sh`); each restart
-  currently generates a **new random Yggdrasil identity** (no private key
-  persistence across restarts in the harness), which is expected — B just
-  needs to re-peer, not recognize the same key.
-- Peer re-establishment after a container restart is not instant — allow a
-  generous timeout (`wait_for 30 ...` in `test/lib.sh`) rather than a tight
-  one; yggdrasil-go's reconnect backoff timing is variable enough that a 15s
-  budget across two rapid restarts was observed to flake. B's peer URI in
-  `test/run.sh` sets `?maxbackoff=5s` (yggdrasil-go's hard minimum — bare
-  `maxbackoff=5` is invalid, it's parsed with `time.ParseDuration` and needs a
-  unit) so the reconnect backoff itself stays small; this makes most re-peers
-  land in ~1s instead of occasionally waiting much longer.
-- **Residual flake, not fixed by `maxbackoff`**: occasionally (~1-in-3
-  observed) `test/cases/04_allowed_sources_config_change.sh`'s second
-  `podman restart` of `A` is followed by B's yggdrasil logging repeated
-  `dial tcp 10.90.0.2:9993: i/o timeout` for 30+ seconds even though A is
-  confirmed up and listening in its own log, and `nc -zv` from B to A
-  succeeds again once the flake clears. This is a transient podman
-  bridge-networking hiccup on the macOS podman-machine VM (gvproxy/vfkit)
-  after a container restart recreates the veth — the TCP SYN itself is not
-  getting a response, so no amount of yggdrasil-level backoff tuning helps.
-  If this test starts flaking persistently, look at host/VM networking
-  convergence delay after `podman restart`, not at `src/` or the peering
-  config.
-- **Same flake can manifest as a hung `podman exec` itself**, not just a B→A
-  TCP dial timeout — observed once as a `podman exec ydn64-test-a ...`
-  command producing literally zero output (not even output from a plain
-  `date` run before it in the same loop) for far longer than expected,
-  immediately after reproducing the case 04 restart flake. Retrying the same
-  `podman exec` a bit later succeeded in under 200ms, confirming it was the
-  transient VM-networking hiccup clearing on its own, not a real hang in
-  ydn64 or a stuck shell. If a `podman exec` seems to hang with no output at
-  all, check `podman ps`/`podman machine` health and just wait/retry rather
-  than assuming ydn64 itself is stuck.
-- **`test/cases/05_real_world_icmp.sh`** (real-world DNS64+NAT64-ICMP check
-  against `dns.google`/8.8.8.8) runs immediately after case 04's restarts.
-  `wait_for` after case 04 only confirms B's yggnet peering is back, not that
-  A's targetnet egress path is fully settled — so case 05's initial `dig`
-  retries a few times (up to ~10s) before failing, rather than asserting on
-  the first attempt.
+- Config-change cases (e.g. `test/cases/05_allowed_sources_config_change.sh`)
+  use the live SIGHUP reload path (`reload_a` in `test/lib.sh`), NOT container
+  restarts — earlier harness generations restarted `A` for config changes,
+  which added re-peering waits and podman-restart flakiness; keep using
+  `reload_a`. B's peer URI in `test/run.sh` still
+  sets `?maxbackoff=5s` (yggdrasil-go's hard minimum — bare `maxbackoff=5` is
+  invalid, it's parsed with `time.ParseDuration` and needs a unit) so any
+  re-peer stays fast if a restart is ever reintroduced.
+- **Transient podman-VM hiccups can still hit any case**, even without
+  restarts: occasionally a `podman exec` produces literally zero output (not
+  even from a plain `date`) for far longer than expected, or a B→A TCP dial
+  times out for 30+ seconds while A is confirmed up and listening — then the
+  exact same command succeeds sub-200ms moments later. This is a macOS
+  podman-machine (gvproxy/vfkit) networking convergence hiccup, not ydn64.
+  Re-run before diagnosing as a code failure, and prefer retry loops in cases
+  over single-shot assertions on freshly booted environments (the first
+  datagram across a new Yggdrasil link can also race key/session setup).
+- **`test/cases/02_dns_google_icmp.sh`** (real-world DNS64+NAT64-ICMP check
+  against `dns.google`/8.8.8.8) requires real internet DNS/ICMP egress from
+  A's egressnet interface and retries its initial `dig` a few times (~10s)
+  rather than asserting on the first attempt, because B's peering being up
+  doesn't guarantee A's UDP forwarder path is fully settled yet.
 
 ## gVisor netstack gotchas (`src/netstack/`)
 

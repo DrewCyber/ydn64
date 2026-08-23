@@ -8,8 +8,13 @@ RUN go mod download
 COPY cmd ./cmd
 COPY src ./src
 RUN CGO_ENABLED=0 go build -o /out/ydn64 ./cmd/ydn64
+# Test-only helper (see test/tools/udpecho): a dependency-free UDP echo
+# server used by cases that need payloads larger than busybox nc can handle.
+COPY test/tools ./test/tools
+RUN CGO_ENABLED=0 go build -o /out/udpecho ./test/tools/udpecho
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 COPY --from=build /out/ydn64 /usr/local/bin/ydn64
+COPY --from=build /out/udpecho /usr/local/bin/udpecho
 ENTRYPOINT ["/usr/local/bin/ydn64"]

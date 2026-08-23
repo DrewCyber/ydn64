@@ -27,10 +27,16 @@ type YggdrasilNIC struct {
 }
 
 // NewYggdrasilNIC creates the Yggdrasil NIC, attaches it to the gVisor stack,
-// adds the 200::/7 route, and registers the node's own address as local.
-func (s *YggdrasilNetstack) NewYggdrasilNIC(ygg *core.Core) tcpip.Error {
+// applies the intended path MTU, adds the 200::/7 route, and registers the
+// node's own address as local. See CreateYdn64Netstack for why ifMTU must be
+// applied to the ipv6rwc explicitly.
+func (s *YggdrasilNetstack) NewYggdrasilNIC(ygg *core.Core, ifMTU uint64) tcpip.Error {
 	rwc := ipv6rwc.NewReadWriteCloser(ygg)
-	s.rwc = rwc // expose for direct raw-packet writes (e.g. NAT64 UDP replies)
+	// Apply the configured MTU BEFORE anything sizes buffers off rwc.MTU()
+	// (the read/write buffers below, and gVisor's NIC route MTU). SetMTU
+	// clamps into [1280, core max].
+	rwc.SetMTU(ifMTU)
+	s.rwc = rwc // expose for direct raw-packet writes (e.g. NAT64 ICMP replies)
 	mtu := rwc.MTU()
 	nic := &YggdrasilNIC{
 		netstack:    s,

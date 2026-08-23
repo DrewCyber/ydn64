@@ -66,6 +66,7 @@ func main() {
 	nat64Enable := flag.Bool("nat64-enable", true, "Nat64Enable (role=ydn64 only)")
 	dns64Enable := flag.Bool("dns64-enable", true, "Dns64Enable (role=ydn64 only)")
 	yggZone := flag.Bool("ygg-zone", true, "include the .ygg Dns64Zones entry (role=ydn64 only)")
+	ifmtu := flag.Int("ifmtu", 1500, "IfMTU for the generated node config(s)")
 	out := flag.String("out", "", "output config file path (required)")
 	envout := flag.String("envout", "", "output KEY=VALUE env file path (required)")
 	flag.Parse()
@@ -89,6 +90,19 @@ func main() {
 	// so behaviour is deterministic regardless of container network multicast
 	// support.
 	ygCfg.MulticastInterfaces = nil
+
+	// A realistic (1500-byte) path MTU instead of yggdrasil's 65535 default.
+	// For the client this is load-bearing: its TUN interface actually
+	// segments/fragments at this size, so datagrams larger than ~1472 bytes
+	// exercise real IPv6 fragmentation + reassembly on the Yggdrasil leg
+	// (see test/cases/08_udp_fragmented_datagrams.sh). The ydn64 node never
+	// builds a TUN, but setting it here keeps both configs symmetric and
+	// documents the harness's assumed path MTU in one place.
+	if *ifmtu < 1280 {
+		fmt.Fprintf(os.Stderr, "error: -ifmtu must be >= 1280 (IPv6 minimum MTU), got %d\n", *ifmtu)
+		os.Exit(1)
+	}
+	ygCfg.IfMTU = uint64(*ifmtu)
 
 	if *role == "ydn64" {
 		// ydn64 always forces these regardless of what's in the file (see
@@ -128,6 +142,14 @@ func main() {
 		dns64Listen := fmt.Sprintf("[%s]:53", nodeAddr.String())
 
 		merged["AllowedSources"] = splitCSV(*allowedSources)
+		// Explicitly empty: production defaults would ignore RFC1918 and
+		// loopback embedded-IPv4 destinations, but the deterministic UDP
+		// fragmentation case (test/cases/08_udp_fragmented_datagrams.sh)
+		// targets a loopback-bound echo server inside container A through
+		// NAT64. Test cases that need private-destination filtering assert
+		// it themselves (see 05_allowed_sources_config_change.sh for the
+		// source-filter analogue).
+		merged["IgnoredDstSubnets"] = []interface{}{}
 		merged["Nat64Enable"] = *nat64Enable
 		merged["Nat64Pool"] = pool6CIDR
 		merged["Nat64UdpTimeout"] = 300

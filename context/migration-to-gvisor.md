@@ -14,7 +14,7 @@ All API names cited below were verified against the exact vendored version.
 |-----|--------------------------------------------------------------|----------|------------|--------|
 | T1  | Migrate NAT64 UDP to gVisor `udp.NewForwarder`               | P0       | —          | DONE   |
 | T2  | TCP keepalive / user-timeout on NAT64 proxied connections    | P1       | —          | DONE   |
-| T3  | Integration verification + fragmented-UDP test case          | P1       | T1         |        |
+| T3  | Integration verification + fragmented-UDP test case          | P1       | T1         | DONE   |
 | T4  | Stack & per-flow stats exposure                              | P2       | —          |        |
 | T5  | Packet tap (multi-listener) via `RegisterPacketEndpoint`     | P2       | —          |        |
 | T6  | Spike: congestion control / MTU probing tunables             | P3       | —          |        |
@@ -567,3 +567,55 @@ Verification:
   would need an IPv4 listener container (topology change — out of scope
   here); the knobs themselves are unit-verified against real gVisor options,
   and normal traffic is unaffected per the full-suite pass.
+
+### T3 — DONE (2026-08-23)
+
+Deviations from the task text and discoveries made while executing it:
+
+- **Case numbered `08`, not `06`**: cases 06/07 were already taken by the
+  DNS64 rcode/EDNS cases; the glob-based runner picks the file up regardless.
+- **The harness had to become fragmentation-capable first.** With yggdrasil's
+  default IfMTU=65535 on both nodes, no UDP datagram could ever exceed the
+  path MTU, so neither the pre-T1 bug nor its fix was exercisable. Changes:
+  - `test/gen -ifmtu` (default **1500**) applied to both generated configs —
+    B's TUN actually segments at that size, forcing real client-side IPv6
+    fragmentation.
+  - Harness config emits `"IgnoredDstSubnets": []` explicitly (production
+    defaults ignore RFC1918+loopback, which would make every A-local test
+    target undialable through NAT64). No existing case relied on defaults.
+  - New test-only helper `test/tools/udpecho` (server + one-shot client)
+    baked into BOTH images: busybox `nc` truncates UDP datagrams to a small
+    fixed buffer in both directions — it failed a plain loopback 2000-byte
+    echo inside container A, independent of ydn64.
+- **Real production bug found and fixed** (`src/netstack`,
+  `cmd/ydn64/main.go`): `ipv6rwc.ReadWriteCloser` defaults its internal MTU
+  to 1280 AND enforces it on inbound frames by dropping them with an ICMPv6
+  Packet Too Big reply. Upstream nodes call `SetMTU(IfMTU)` when wiring their
+  TUN; TUN-less ydn64 never did, so the node silently PTB'd every client
+  frame above 1280 regardless of configuration. Observed live as a flaky
+  "message too long" on B's socket for the first oversized exchange (PMTU
+  converged to 1280 after one PTB round-trip; later attempts passed).
+  `CreateYdn64Netstack(ygg, ifMTU, pool6CIDR)` now applies `rwc.SetMTU`
+  before anything sizes buffers off it. This also makes gVisor fragment
+  oversized *outbound* datagrams at the configured MTU, i.e. case 08 now
+  exercises both reassembly (B→A) and egress fragmentation (A→B).
+- Case script details: bracketed IPv6 literals are mandatory for Go's
+  `net.ResolveUDPAddr` (`[v6]:port`); roundtrips retry up to 5× because the
+  first datagram across a freshly booted link can race session setup.
+
+Test case added:
+
+- `test/cases/08_udp_fragmented_datagrams.sh`: 64 B unfragmented exchange,
+  2000 B (2 fragments) and 4000 B (3 fragments) exchanges verified by
+  sha256+length end-to-end through NAT64 against an echo server on A's
+  loopback, plus a direct `dig @pool6::808:808` query proving forwarder flows
+  coexist with DNS64's bound endpoint on the same stack.
+
+Verification: full suite `./run.sh down && ./run.sh all` — **all cases
+passed**, including case 02 (ICMP interceptor contract intact) and the new
+case 08. `go build ./... && go vet ./...` clean, `go test -race ./...` clean.
+Docs updated: AGENTS.md (IfMTU/SetMTU gotcha rewritten — the old text claimed
+IfMTU was never read; harness section documents udpecho, the 1500 MTU and the
+empty IgnoredDstSubnets; stale restart-flake notes replaced with the current
+SIGHUP-reload reality), RFCs.txt unchanged this round (§3.4 wording already
+updated by T1).

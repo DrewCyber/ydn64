@@ -47,10 +47,20 @@ func (s *YggdrasilNetstack) SetPacketInterceptor(fn func([]byte) bool) {
 }
 
 // CreateYdn64Netstack builds the gVisor stack, attaches the Yggdrasil NIC,
-// and — when pool6CIDR is non-empty (e.g. "301:363a:9499:c858::/96") —
-// enables promiscuous mode so gVisor's TCP forwarder can accept packets
-// destined to any address in the pool6 range.
-func CreateYdn64Netstack(ygg *core.Core, pool6CIDR string) (*YggdrasilNetstack, error) {
+// applies the intended path MTU, and — when pool6CIDR is non-empty
+// (e.g. "301:363a:9499:c858::/96") — enables promiscuous mode so gVisor's
+// forwarders can accept packets destined to any address in the pool6 range.
+//
+// ifMTU is the configured Yggdrasil interface MTU (ygconfig NodeConfig's
+// IfMTU). This matters more than it looks: ipv6rwc.ReadWriteCloser defaults
+// its internal MTU to a conservative 1280 and ENFORCES it on the inbound
+// path — any frame larger is dropped and answered with ICMPv6 Packet Too
+// Big — until someone calls SetMTU. A TUN-based node wires its TUN's MTU
+// here; ydn64 has no TUN, so the netstack itself must apply the configured
+// value, otherwise clients obeying larger-than-1280 interface MTUs hit a
+// spurious PTB round-trip (or a dropped datagram) on their first big
+// packet. Values outside [1280, coreMax] are clamped by SetMTU.
+func CreateYdn64Netstack(ygg *core.Core, ifMTU uint64, pool6CIDR string) (*YggdrasilNetstack, error) {
 	// NOTE: HandleLocal is intentionally left false (the default). gVisor's
 	// HandleLocal mode is meant for same-stack loopback shortcutting, which
 	// ydn64 never needs (it only ever talks to remote Yggdrasil peers). When
@@ -67,7 +77,7 @@ func CreateYdn64Netstack(ygg *core.Core, pool6CIDR string) (*YggdrasilNetstack, 
 		}),
 	}
 
-	if tcpErr := s.NewYggdrasilNIC(ygg); tcpErr != nil {
+	if tcpErr := s.NewYggdrasilNIC(ygg, ifMTU); tcpErr != nil {
 		return nil, fmt.Errorf("creating Yggdrasil NIC: %s", tcpErr.String())
 	}
 

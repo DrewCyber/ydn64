@@ -272,7 +272,7 @@ func main() {
 		pool6CIDR = nat64Cfg.Pool6
 	}
 
-	ns, err := netstack.CreateYdn64Netstack(n.core, pool6CIDR)
+	ns, err := netstack.CreateYdn64Netstack(n.core, ygCfg.IfMTU, pool6CIDR)
 	if err != nil {
 		logger.Fatalf("failed to create netstack: %v", err)
 	}
