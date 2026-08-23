@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -524,6 +525,203 @@ func TestDNS64NonINQClassAndSyntheticTTL(t *testing.T) {
 			t.Errorf("expected TTL 600, got %d", aaaa.Header().Ttl)
 		}
 	})
+}
+
+// newTestProxy builds a proxy with a catch-all synthesis zone pointing at
+// serverAddr, matching the setup used by the other handler tests.
+func newTestProxy(serverAddr string) *proxy {
+	p := &proxy{
+		cache: newCache(300*time.Second, 600*time.Second),
+	}
+	prefix := net.ParseIP("64:ff9b::")
+	if prefix == nil {
+		panic("failed to parse prefix")
+	}
+	p.reload(serverAddr, IAIgnore, []zone{
+		{
+			domains:             []string{"."},
+			prefix:              prefix,
+			returnIPv4Addresses: false,
+			returnIPv6Addresses: false,
+		},
+	}, nil)
+	return p
+}
+
+func startTestDNSServer(t *testing.T, handler dns.HandlerFunc) (string, net.PacketConn) {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen UDP: %v", err)
+	}
+	server := &dns.Server{PacketConn: pc, Handler: handler}
+	done := make(chan struct{})
+	go func() {
+		_ = server.ActivateAndServe()
+		close(done)
+	}()
+	t.Cleanup(func() {
+		_ = server.Shutdown()
+		<-done
+	})
+	return pc.LocalAddr().String(), pc
+}
+
+// TestRFC5452UpstreamTXIDRandomized verifies that ydn64 picks its own random
+// transaction ID for upstream queries instead of relaying the client's ID,
+// and that the client still receives its response under its original ID.
+func TestRFC5452UpstreamTXIDRandomized(t *testing.T) {
+	const clientID uint16 = 0xBEEF
+
+	var mu sync.Mutex
+	var upstreamIDs []uint16
+
+	addr, _ := startTestDNSServer(t, dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
+		// Only the final A query of each synthesis pair is counted; the
+		// preceding AAAA query doubles the total traffic otherwise.
+		if len(req.Question) == 1 && req.Question[0].Qtype == dns.TypeA {
+			mu.Lock()
+			upstreamIDs = append(upstreamIDs, req.Id)
+			mu.Unlock()
+		}
+		resp := new(dns.Msg)
+		resp.SetReply(req)
+		if len(req.Question) == 1 && req.Question[0].Qtype == dns.TypeA {
+			rr, _ := dns.NewRR(fmt.Sprintf("%s 300 IN A 192.0.2.10", req.Question[0].Name))
+			if rr != nil {
+				resp.Answer = append(resp.Answer, rr)
+			}
+		}
+		w.WriteMsg(resp)
+	}))
+
+	p := newTestProxy(addr)
+
+	const queries = 24
+	for i := 0; i < queries; i++ {
+		req := new(dns.Msg)
+		// Unique names per iteration so the cache never serves a repeat.
+		name := fmt.Sprintf("t%d.txid.example.com.", i)
+		req.SetQuestion(name, dns.TypeAAAA)
+		req.Id = clientID // set AFTER SetQuestion, which generates a fresh ID
+		resp := p.handle(req)
+
+		if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 1 {
+			t.Fatalf("query %d: expected success with 1 synthetic answer, got rcode %d, %d answers",
+				i, resp.Rcode, len(resp.Answer))
+		}
+		if resp.Id != clientID {
+			t.Fatalf("query %d: client-facing response must carry the client's ID 0x%04X, got 0x%04X",
+				i, clientID, resp.Id)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(upstreamIDs) != queries {
+		t.Fatalf("expected %d upstream queries, server saw %d", queries, len(upstreamIDs))
+	}
+	distinct := make(map[uint16]bool)
+	for _, id := range upstreamIDs {
+		distinct[id] = true
+		if id == clientID {
+			t.Errorf("client-supplied ID 0x%04X was relayed upstream verbatim", clientID)
+		}
+	}
+	// With a per-query random ID, 24 queries collapsing to a single distinct
+	// ID has probability ~24·(1/65536)^23 — effectively impossible.
+	if len(distinct) < 2 {
+		t.Errorf("upstream transaction IDs show no variation (%d distinct in %d queries)", len(distinct), queries)
+	}
+}
+
+// TestRFC5452ForgedAnswerRejected verifies that an upstream reply carrying a
+// transaction ID other than the one ydn64 sent is not accepted: the query
+// fails closed with SERVFAIL rather than returning spoofed data.
+//
+// The ~5 s duration is inherent to what is being verified: after discarding a
+// mismatched ID, the DNS library keeps waiting for the genuine answer until
+// its timeout expires — an attacker must hold that whole window. The mock
+// server never sends a matching reply, so ydn64 surfaces the timeout as
+// SERVFAIL.
+func TestRFC5452ForgedAnswerRejected(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen UDP: %v", err)
+	}
+	serverAddr := pc.LocalAddr().String()
+
+	dnsServer := &dns.Server{
+		PacketConn: pc,
+		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+			resp.Id = req.Id ^ 0xFFFF // forged: any ID but the one sent
+			if len(req.Question) == 1 && req.Question[0].Qtype == dns.TypeA {
+				rr, _ := dns.NewRR(fmt.Sprintf("%s 300 IN A 6.6.6.6", req.Question[0].Name))
+				if rr != nil {
+					resp.Answer = append(resp.Answer, rr)
+				}
+			}
+			w.WriteMsg(resp)
+			// Close the socket so the DNS library's read loop (which
+			// discards mismatched IDs and keeps waiting for a match)
+			// errors out promptly instead of sitting out its full timeout.
+			pc.Close()
+		}),
+	}
+	go func() {
+		_ = dnsServer.ActivateAndServe()
+	}()
+	t.Cleanup(func() {
+		_ = dnsServer.Shutdown()
+	})
+
+	p := newTestProxy(serverAddr)
+
+	req := new(dns.Msg)
+	req.SetQuestion("forged.example.com.", dns.TypeAAAA)
+	resp := p.handle(req)
+
+	if resp.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("forged-ID answer must fail closed as SERVFAIL, got rcode %d", resp.Rcode)
+	}
+	for _, rr := range resp.Answer {
+		if aaaa, ok := rr.(*dns.AAAA); ok && aaaa.AAAA.String() == "64:ff9b::606:606" {
+			t.Fatal("spoofed A record was synthesised into the client answer")
+		}
+	}
+}
+
+// TestRFC5452PassThroughRestoresClientID covers the handlers that forward the
+// upstream response object itself (pass-through, A, PTR): even there the
+// client must receive its own transaction ID back.
+func TestRFC5452PassThroughRestoresClientID(t *testing.T) {
+	const clientID uint16 = 0x1234
+
+	addr, _ := startTestDNSServer(t, dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
+		resp := new(dns.Msg)
+		resp.SetReply(req)
+		w.WriteMsg(resp)
+	}))
+
+	p := newTestProxy(addr)
+
+	for _, tc := range []struct {
+		name  string
+		qtype uint16
+	}{
+		{"passthrough.example.com.", dns.TypeTXT},
+		{"direct-a.example.com.", dns.TypeA},
+	} {
+		req := new(dns.Msg)
+		req.SetQuestion(tc.name, tc.qtype)
+		req.Id = clientID // set AFTER SetQuestion, which generates a fresh ID
+		resp := p.handle(req)
+		if resp.Id != clientID {
+			t.Errorf("%s: expected client ID 0x%04X in response, got 0x%04X", tc.name, clientID, resp.Id)
+		}
+	}
 }
 
 func TestDNS64CNAMEChainPreservationAndOwnerName(t *testing.T) {

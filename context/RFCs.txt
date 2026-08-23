@@ -195,9 +195,10 @@ RFC 2308 — Negative Caching of DNS Queries (DNS NCACHE)               [DONE]
 
 RFC 5452 — Measures for Making DNS More Resilient against Forged
            Answers                                                 [PARTIAL]
-    Source port is randomised by the OS. §9.2 query-ID unpredictability
-    is violated: the client's transaction ID is forwarded upstream
-    verbatim.                                                         [TODO]
+    Source port is randomised by the OS. §9.2 query-ID unpredictability:
+    upstream queries carry a ydn64-chosen random transaction ID — the
+    client's own ID never leaves the node; answers whose ID does not
+    match are discarded and the client's ID restored on return.       [DONE]
     0x20 name randomisation is optional hardening; not
     implemented.                                                      [TODO]
 

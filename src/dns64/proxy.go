@@ -75,7 +75,27 @@ var ipv4OnlyARPAIPs = []net.IP{
 // lookup performs a UDP DNS query and returns the response. Forwarders in
 // the Yggdrasil address range (200::/7) are dialled through the embedded
 // gVisor netstack; everything else uses the host OS network stack.
+//
+// RFC 5452 §9.2: the transaction ID used upstream is chosen randomly by
+// ydn64, never relayed from the client's query — an allowed client must not
+// be able to dictate the ID an off-path spoofer has to guess. The DNS
+// library discards any upstream answer whose ID does not match the one sent,
+// and the client's original ID is restored on the response before it is
+// returned (several handlers forward the upstream response object itself).
 func (p *proxy) lookup(server string, req *dns.Msg) (*dns.Msg, error) {
+	origID := req.Id
+	req.Id = dns.Id()
+	defer func() { req.Id = origID }()
+
+	resp, err := p.lookupUpstream(server, req)
+	if resp != nil {
+		resp.Id = origID
+	}
+	return resp, err
+}
+
+// lookupUpstream sends req to the configured forwarder unchanged.
+func (p *proxy) lookupUpstream(server string, req *dns.Msg) (*dns.Msg, error) {
 	host, _, err := net.SplitHostPort(server)
 	if err == nil {
 		if ip := net.ParseIP(host); ip != nil && p.ns != nil && yggdrasilRange.Contains(ip) {
