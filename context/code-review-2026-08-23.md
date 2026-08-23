@@ -46,12 +46,32 @@ Severity: **P0** fix now · **P1** fix soon · **P2** should fix · **P3** polis
   interleave on shared memory), and `WritePackets` now keeps an explicit
   `written` counter — success returns the packet count, failure returns
   written-so-far + error (never `-1`); async-queued control frames count as
-  written once accepted into `ctrlPackets`, queue-full drops are not counted.
+  written once accepted into `ctrlPackets`,   queue-full drops are not counted.
   Covered by `src/netstack/yggdrasil_test.go`: `TestWritePacketsConcurrentNoRace`
   (8 goroutines × 250 batches vs. the flusher — reproduces a `DATA RACE` in
   `WritePackets` under `-race` against the old code), plus contract tests for
   success counts, `(0, err)` first-packet failure, partial counts on mid-batch
   failure, and queue-full drop accounting (all fail against the old code).
+- **[2026-08-23] R2 fixed** (commit `e4fa656`, verified present at
+  `src/dns64/proxy.go` `lookup`: upstream queries use `dns.Id()`; client ID
+  restored on return paths).
+- **[2026-08-23] R5 fixed** (commit `23a35c0`): NAT-assigned outbound ICMP
+  identifiers mapped back to `(client, destination, clientID)`,
+  `LoadOrStore` semantics and bounded table in `src/nat64/icmp.go`.
+- **[2026-08-23] R7 fixed**: `src/nat64/service.go` `Start()` opens and
+  publishes `icmpConn` BEFORE installing the packet interceptor
+  (`SetPacketInterceptor` runs last among the ICMP steps).
+- **[2026-08-23] R8 fixed**: `.github/workflows/ci.yml` added — push-to-main
+  + PR gates: build, vet, `go test -race ./...` (Go from go.mod via
+  actions/setup-go) and shellcheck over all repo shell scripts at error
+  severity.
+- **[2026-08-23] R4b fixed** in `src/dns64/cache.go`: entries now expire at
+  `min(smallest RR TTL in the answer, Dns64CacheExpiration)` instead of
+  living exactly `Dns64CacheExpiration` regardless of upstream TTL, and hits
+  return copies with TTLs decremented by time spent in the cache (clamped at
+  zero) instead of re-serving undecremented values. Covered by
+  `src/dns64/cache_test.go` (upstream-TTL expiry, config clamping,
+  decrement-on-hit + copy independence, disabled-cache legacy behaviour).
 
 ---
 
@@ -61,14 +81,7 @@ Severity: **P0** fix now · **P1** fix soon · **P2** should fix · **P3** polis
 
 #### R1 · ~~Data race on the shared `writeBuf` corrupts outbound packets~~ — FIXED 2026-08-23 (see §1)
 
-#### R2 · Upstream DNS queries reuse the client-supplied transaction ID
-`src/dns64/proxy.go` — every query builder does `req.CopyTo(upReq)` and sends
-verbatim; `dns.Id()` appears nowhere. An allowed client picks the TXID ydn64
-uses upstream, collapsing off-path spoofing to ~2¹⁶ with a shared cache
-amplifying it to all clients. Fix in the single choke point (`lookup`):
-randomise `upReq.Id = dns.Id()`, restore the client ID on every return path;
-optionally add 0x20 qname case randomisation with response verification.
-(Status mirrored in RFCs.txt under RFC 5452.)
+#### R2 · ~~Upstream DNS queries reuse the client-supplied transaction ID~~ — FIXED 2026-08-23 (commit `e4fa656`, see §1)
 
 #### R3 · ~~`WritePackets` violates its contract: returns 0 on success, −1 possible on failure~~ — FIXED 2026-08-23 (see §1, fixed together with R1)
 
@@ -86,31 +99,11 @@ DNS64 query handling and NAT64 `handleTCP` bodies — shed, don't queue;
 (`golang.org/x/time/rate`). Session caps are also the prerequisite for the
 deferred EIM/BIB work (see RFCs.txt RFC 6146 §3.1).
 
-#### R4b · Cache TTL semantics ignore upstream TTL
-`src/dns64/cache.go`: entries live exactly `Dns64CacheExpiration` regardless of
-upstream TTL and hits re-serve the non-decremented TTL. Store
-`expireAt = min(upstreamTTL, cfgExp)` and decrement TTL by elapsed time on hit.
+#### R4b · ~~Cache TTL semantics ignore upstream TTL~~ — FIXED 2026-08-23 (see §1; entry-count caps remain open under R4)
 
-#### R5 · ICMP echo sessions hijackable via client-chosen identifier
-`src/nat64/icmp.go`: sessions keyed on the client's Echo Identifier verbatim
-with last-writer-wins `Store` — cross-peer reply leaks/squatting (Linux ping
-uses the PID; collisions common). Fix: NAT-allocated outbound IDs mapped from
-`(srcAddr, dst, clientID)`, restore client ID on reply, `LoadOrStore`
-semantics, bound the table (fold into R4). Status mirrored in RFCs.txt
-(RFC 6146 §3.5.3 / RFC 5508 REQ-1).
+#### R5 · ~~ICMP echo sessions hijackable via client-chosen identifier~~ — FIXED 2026-08-23 (commit `23a35c0`, see §1)
 
-#### R7 · `icmpConn` published AFTER the interceptor that reads it
-`service.go Start()`: `SetPacketInterceptor` runs before `s.icmpConn` is
-assigned — unsynchronized publish plus a window where echoes are consumed and
-dropped even though the socket works. Reorder (open socket first) or store in
-an `atomic.Pointer[icmp.PacketConn]`.
-
-#### R8 · No CI pipeline
-`.github/workflows/` has only tag-triggered `release.yml`. Nothing runs
-vet/test/-race on push/PR despite AI-heavy contribution history. Add
-`ci.yml` (push+PR): build, vet, `go test -race ./...`; optionally
-golangci-lint/shellcheck. Netstack unit tests now exist, but R1's write path
-still needs its own concurrency regression test.
+#### R7 · ~~`icmpConn` published AFTER the interceptor that reads it~~ — FIXED 2026-08-23 (see §1)
 
 ### P2
 
@@ -208,10 +201,10 @@ relaying to the v4 internet. Cheap to add using the existing
 
 | Step | Items | Why | Effort |
 |---|---|---|---|
-| 1 | R8 (CI) + ~~R1 + R3~~ (done 2026-08-23) | Gates first; the two netstack bugs in one pass; R1 needs its -race test to matter | small–medium |
-| 2 | R2 (TXID) | ~10 lines, closes the top security hole | small |
-| 3 | R7 + lastSeenNs-style mechanical races | trivial, removes all known races | small |
-| 4 | R4 staged (cache caps → semaphores → session caps) + R4b | biggest stability win under adversarial load | medium |
+| 1 | ~~R8 (CI) + R1 + R3~~ (done 2026-08-23) | Gates first; the two netstack bugs in one pass; R1 needs its -race test to matter | small–medium |
+| 2 | ~~R2 (TXID)~~ (done, commit e4fa656) | ~10 lines, closes the top security hole | small |
+| 3 | ~~R7 + lastSeenNs-style mechanical races~~ (done; R7 publish order + atomic lastSeenNs in tree) | trivial, removes all known races | small |
+| 4 | R4 staged (cache caps → semaphores → session caps) + ~~R4b~~ (TTL semantics done 2026-08-23) | biggest stability win under adversarial load | medium |
 | 5 | R9 (/96 + forwarder validation + empty-allowlist warning) | silent misconfigs become startup errors | small |
 | 6 | R10 (EDNS normalisation + real-function test) | interop correctness | small |
 | 7 | R5 (ICMP ID rewrite), R16 (ICMP-path validation), R11/R12 | robustness | medium |

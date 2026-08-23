@@ -4,10 +4,17 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
-// dnsCache is a simple TTL cache for DNS answers.
-// Keys are DNS question names (FQDN strings), values are []dns.RR slices.
+// dnsCache is a TTL cache for DNS answer RR slices.
+// Keys are DNS question names (FQDN strings). Each entry expires after
+// min(smallest RR TTL in the answer, configured default expiration), so a
+// short-lived upstream record cannot outlive its TTL just because
+// Dns64CacheExpiration is large. Cache hits return copies whose TTLs are
+// decremented by the time spent in the cache — re-serving an undecremented
+// TTL would let clients pin stale records forever (RFC 2181 §8).
 type dnsCache struct {
 	mu            sync.RWMutex
 	items         map[string]cacheItem
@@ -17,8 +24,9 @@ type dnsCache struct {
 }
 
 type cacheItem struct {
-	value      interface{}
+	value      []dns.RR
 	expiration int64 // Unix nanoseconds; 0 = never expires
+	ttl        time.Duration
 }
 
 func newCache(defaultExp, purgeInterval time.Duration) *dnsCache {
@@ -56,27 +64,53 @@ func (c *dnsCache) Reload(defaultExp, purgeInterval time.Duration) {
 	c.mu.Unlock()
 }
 
-func (c *dnsCache) set(k string, v interface{}) {
+func (c *dnsCache) set(k string, rrs []dns.RR) {
 	var exp int64
+	var eff time.Duration
 	if d := c.defaultExp.Load(); d > 0 {
-		exp = time.Now().Add(time.Duration(d)).UnixNano()
+		eff = time.Duration(d)
+		if minTTL := minRRTTL(rrs); minTTL > 0 && minTTL < eff {
+			eff = minTTL
+		}
+		exp = time.Now().Add(eff).UnixNano()
 	}
 	c.mu.Lock()
-	c.items[k] = cacheItem{value: v, expiration: exp}
+	c.items[k] = cacheItem{value: rrs, expiration: exp, ttl: eff}
 	c.mu.Unlock()
 }
 
-func (c *dnsCache) get(k string) (interface{}, bool) {
+// get returns a copy of the cached RRs with TTLs decremented by their time
+// in the cache (clamped at zero). Callers may mutate the result freely; the
+// stored entry stays untouched.
+func (c *dnsCache) get(k string) ([]dns.RR, bool) {
 	c.mu.RLock()
 	item, ok := c.items[k]
 	c.mu.RUnlock()
 	if !ok {
 		return nil, false
 	}
-	if item.expiration > 0 && time.Now().UnixNano() > item.expiration {
+	now := time.Now().UnixNano()
+	if item.expiration > 0 && now > item.expiration {
 		return nil, false
 	}
-	return item.value, true
+	if item.ttl <= 0 || item.expiration <= 0 {
+		return item.value, true
+	}
+	elapsed := item.ttl - time.Duration(item.expiration-now)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	out := make([]dns.RR, len(item.value))
+	for i, rr := range item.value {
+		cp := dns.Copy(rr)
+		if dec := uint32(elapsed / time.Second); dec >= cp.Header().Ttl {
+			cp.Header().Ttl = 0
+		} else {
+			cp.Header().Ttl -= dec
+		}
+		out[i] = cp
+	}
+	return out, true
 }
 
 func (c *dnsCache) janitor() {
@@ -91,4 +125,16 @@ func (c *dnsCache) janitor() {
 		}
 		c.mu.Unlock()
 	}
+}
+
+// minRRTTL returns the smallest TTL among rrs (0 when the slice is empty).
+func minRRTTL(rrs []dns.RR) time.Duration {
+	var min uint32
+	for i, rr := range rrs {
+		ttl := rr.Header().Ttl
+		if i == 0 || ttl < min {
+			min = ttl
+		}
+	}
+	return time.Duration(min) * time.Second
 }

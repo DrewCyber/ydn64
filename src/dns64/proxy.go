@@ -277,7 +277,7 @@ func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string
 	if cached, ok := p.cache.get(q.Name); ok {
 		resp := new(dns.Msg)
 		req.CopyTo(resp)
-		resp.Answer = cached.([]dns.RR)
+		resp.Answer = cached
 		resp.Question[0].Qtype = dns.TypeAAAA
 		resp.Response = true
 		return resp, nil
