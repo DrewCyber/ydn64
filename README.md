@@ -45,6 +45,19 @@ practice you only need to edit two fields before running:
 
 Everything else is configured with secure, working defaults out of the box.
 
+### Resource limits
+
+Any allowed peer can generate unbounded load, so the services are bounded by
+default. All four keys accept any positive integer; unset or non-positive
+values fall back to these defaults:
+
+| Key | Default | Behaviour at the limit | Reloadable |
+|---|---|---|---|
+| `Nat64MaxTCPConnections` | 1024 | new connections refused (RST) | no — restart |
+| `Nat64MaxUDPSessions` | 4096 | least-recently-active session evicted | yes |
+| `Dns64MaxCacheEntries` | 4096 | expired entries purged, else random eviction | yes |
+| `Dns64MaxConcurrentQueries` | 512 | excess UDP queries → SERVFAIL, TCP conns closed | no — restart |
+
 ## 3. Run
 
 ```sh

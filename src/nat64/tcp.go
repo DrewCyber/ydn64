@@ -99,10 +99,20 @@ func (s *Service) handleTCP(req *tcp.ForwarderRequest, logger *log.Logger) {
 	}
 	dstAddr := net.JoinHostPort(ipv4.String(), strconv.Itoa(int(id.LocalPort)))
 
+	// Shed, don't queue: when the connection limit is reached, refuse the
+	// new flow immediately (Complete(true) aborts the handshake → RST)
+	// instead of letting unbounded proxy goroutines pile up.
+	if !s.tryAcquireTCP() {
+		logger.Debugf("NAT64 TCP shedding %s → %s (connection limit)", srcIP, dstAddr)
+		req.Complete(true)
+		return
+	}
+
 	// CreateEndpoint completes the three-way handshake synchronously.
 	var wq waiter.Queue
 	ep, tcpErr := req.CreateEndpoint(&wq)
 	if tcpErr != nil {
+		s.releaseTCP()
 		req.Complete(true)
 		return
 	}
@@ -115,6 +125,7 @@ func (s *Service) handleTCP(req *tcp.ForwarderRequest, logger *log.Logger) {
 	yggConn := gonet.NewTCPConn(&wq, ep)
 
 	go func() {
+		defer s.releaseTCP()
 		defer yggConn.Close()
 
 		conn4, err := net.DialTimeout("tcp4", dstAddr, 10*time.Second)

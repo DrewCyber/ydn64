@@ -228,6 +228,15 @@ func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string, peers, allowed
 	sb.WriteString("  # Idle timeout in seconds before a UDP NAT64 session is expired.\n")
 	sb.WriteString("  Nat64UdpTimeout: 300\n\n")
 
+	sb.WriteString("  # Maximum number of concurrently proxied NAT64 TCP connections.\n")
+	sb.WriteString("  # Excess connections are refused until existing ones close.\n")
+	sb.WriteString("  # Applied at startup; changing this value requires a restart.\n")
+	sb.WriteString("  Nat64MaxTCPConnections: 1024\n\n")
+
+	sb.WriteString("  # Maximum number of tracked NAT64 UDP sessions; when full, the\n")
+	sb.WriteString("  # least-recently-active session is evicted to make room.\n")
+	sb.WriteString("  Nat64MaxUDPSessions: 4096\n\n")
+
 	sb.WriteString("  # Enable DNS64 service. If false, the DNS64 service will not be started.\n")
 	sb.WriteString("  Dns64Enable: true\n\n")
 
@@ -238,6 +247,16 @@ func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string, peers, allowed
 	sb.WriteString("  Dns64Default: \"8.8.8.8:53\"\n")
 	sb.WriteString("  Dns64CacheExpiration: 300\n")
 	sb.WriteString("  Dns64CachePurge: 600\n\n")
+
+	sb.WriteString("  # Maximum number of DNS cache entries; when full, expired entries are\n")
+	sb.WriteString("  # evicted first, otherwise an arbitrary entry is evicted.\n")
+	sb.WriteString("  Dns64MaxCacheEntries: 4096\n\n")
+
+	sb.WriteString("  # Maximum number of concurrent DNS64 queries in flight (UDP query\n")
+	sb.WriteString("  # goroutines + DNS-over-TCP connections). Excess UDP queries are\n")
+	sb.WriteString("  # answered with SERVFAIL immediately and excess TCP connections are\n")
+	sb.WriteString("  # closed. Applied at startup; changing it requires a restart.\n")
+	sb.WriteString("  Dns64MaxConcurrentQueries: 512\n\n")
 
 	sb.WriteString("  # Dns64InvalidAddress: \"ignore\" | \"process\" | \"discard\"\n")
 	sb.WriteString("  # What to do with an \"0.0.0.0\" and [::] addresses\n")

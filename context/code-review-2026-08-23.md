@@ -72,6 +72,31 @@ Severity: **P0** fix now · **P1** fix soon · **P2** should fix · **P3** polis
   zero) instead of re-serving undecremented values. Covered by
   `src/dns64/cache_test.go` (upstream-TTL expiry, config clamping,
   decrement-on-hit + copy independence, disabled-cache legacy behaviour).
+- **[2026-08-23] R4 stages 1–3 fixed** (stage 4 per-source token buckets
+  still open):
+  - *Stage 1* — new `Dns64MaxCacheEntries` (default 4096); cache keyed by
+    `{name, qtype}` (`cacheKey`, killing the latent name-only collision) with
+    expired-first-then-random eviction at capacity
+    (`dnsCache.makeRoomLocked`). Reloadable via SIGHUP.
+  - *Stage 2* — new `Dns64MaxConcurrentQueries` (default 512): shedding
+    semaphore around DNS64 query handling (UDP queries over the limit get an
+    immediate SERVFAIL, excess DNS-over-TCP connections are closed) and new
+    `Nat64MaxTCPConnections` (default 1024): `handleTCP` sheds with
+    `Complete(true)`/RST instead of queueing unbounded proxy goroutines.
+    Semaphore sizes are applied at startup (documented restart-only).
+  - *Stage 3* — new `Nat64MaxUDPSessions` (default 4096, reloadable):
+    admission control before endpoint creation evicts the
+    least-recently-active session via a strictly-paired
+    insert/removal-counter (`udpSessions`) whose increments/decrements track
+    actual map occupancy through stale-entry replacement and CAS-deletes;
+    flows are dropped when the bound cannot be met. The ICMP echo-session
+    table was already bounded (`maxICMPSessions = 4096`).
+  - Config plumbing end-to-end: `AppConfig.Validate()` defaults,
+    `-genconf` template comments (incl. restart-only notes), README
+    "Resource limits" table. Tests: `src/nat64/limits_test.go`
+    (end-to-end eviction through the synthetic stack, drop-when-unbounded-
+    impossible, TCP shed), `src/dns64/shed_test.go` (slot semaphore +
+    SERVFAIL shape), `cache_test.go` capacity/eviction/qtype-key tests.
 
 ---
 
@@ -87,7 +112,7 @@ Severity: **P0** fix now · **P1** fix soon · **P2** should fix · **P3** polis
 
 ### P1
 
-#### R4 · No resource bounds anywhere (DoS by any allowed peer)
+#### R4 · Resource bounds — PARTIALLY FIXED 2026-08-23 (stages 1–3 done, see §1; stage 4 per-source token bucket `golang.org/x/time/rate` still open)
 Unbounded today: DNS64 goroutine per UDP datagram (`serveUDP`), DoT connections,
 concurrent upstream queries, NAT64 TCP proxy pairs, UDP sessions (socket +
 relay goroutines + 2×64 KiB buffers each), ICMP sessions, DNS cache entries
@@ -204,7 +229,7 @@ relaying to the v4 internet. Cheap to add using the existing
 | 1 | ~~R8 (CI) + R1 + R3~~ (done 2026-08-23) | Gates first; the two netstack bugs in one pass; R1 needs its -race test to matter | small–medium |
 | 2 | ~~R2 (TXID)~~ (done, commit e4fa656) | ~10 lines, closes the top security hole | small |
 | 3 | ~~R7 + lastSeenNs-style mechanical races~~ (done; R7 publish order + atomic lastSeenNs in tree) | trivial, removes all known races | small |
-| 4 | R4 staged (cache caps → semaphores → session caps) + ~~R4b~~ (TTL semantics done 2026-08-23) | biggest stability win under adversarial load | medium |
+| 4 | R4 staged (~~cache caps → semaphores → session caps~~ done 2026-08-23; per-source token buckets open) + ~~R4b~~ (TTL semantics done 2026-08-23) | biggest stability win under adversarial load | medium |
 | 5 | R9 (/96 + forwarder validation + empty-allowlist warning) | silent misconfigs become startup errors | small |
 | 6 | R10 (EDNS normalisation + real-function test) | interop correctness | small |
 | 7 | R5 (ICMP ID rewrite), R16 (ICMP-path validation), R11/R12 | robustness | medium |

@@ -1,6 +1,7 @@
 package nat64
 
 import (
+	"math"
 	"net"
 	"strconv"
 	"sync/atomic"
@@ -100,6 +101,48 @@ func (s *Service) parseUDPFlow(id stack.TransportEndpointID) (udpFlow, bool) {
 	return flow, true
 }
 
+// admitUDPSession reports whether a new UDP session may be created under the
+// configured Nat64MaxUDPSessions bound. At capacity the single
+// least-recently-active session is evicted (closing its legs; its relay loops
+// then unregister it) and admission is retried a bounded number of times —
+// the eviction decrements the counter synchronously, so the loop converges
+// without blocking. Returns false when the limit cannot be met (no sessions
+// to evict and counter still at/over capacity after transient races).
+func (s *Service) admitUDPSession() bool {
+	max := s.settings.Load().maxUDPSessions
+	if max <= 0 {
+		return true
+	}
+	for attempt := 0; attempt < 8; attempt++ {
+		if s.udpSessions.Load() < max {
+			return true
+		}
+		s.evictOldestIdleUDPSession()
+	}
+	return s.udpSessions.Load() < max
+}
+
+// evictOldestIdleUDPSession tears down the tracked UDP session with the
+// smallest lastSeen timestamp (nil-safe no-op when none are tracked). The
+// delete inside deleteSession is what keeps udpSessions consistent.
+func (s *Service) evictOldestIdleUDPSession() {
+	var (
+		oldestKey  sessionKey
+		oldest     *udpSession
+		oldestSeen int64 = math.MaxInt64
+	)
+	s.sessions.Range(func(k, v any) bool {
+		sess := v.(*udpSession)
+		if seen := atomic.LoadInt64(&sess.lastSeenNs); seen < oldestSeen {
+			oldestSeen, oldest, oldestKey = seen, sess, k.(sessionKey)
+		}
+		return true
+	})
+	if oldest != nil {
+		s.deleteSession(oldest, oldestKey)
+	}
+}
+
 // handleUDPForward is called by udp.NewForwarder for every inbound UDP
 // datagram that did not match a registered endpoint. It runs synchronously
 // inside gVisor's packet processing path, so only cheap filtering and endpoint
@@ -113,6 +156,12 @@ func (s *Service) handleUDPForward(req *udp.ForwarderRequest, logger *log.Logger
 		// would make the stack emit an ICMPv6 port-unreachable sourced from
 		// the packet's destination address, which must never happen for
 		// addresses we don't own (or for sources we chose to drop silently).
+		return true
+	}
+
+	// Shed before creating any endpoint: an over-limit flow costs nothing.
+	if !s.admitUDPSession() {
+		logger.Debugf("NAT64 UDP shedding flow %v (session limit)", flow.key)
 		return true
 	}
 
@@ -145,7 +194,9 @@ func (s *Service) handleUDPForward(req *udp.ForwarderRequest, logger *log.Logger
 		conn4, err := net.DialUDP("udp4", nil, dstUDPAddr)
 		if err != nil {
 			logger.Debugf("NAT64 UDP dial %s: %v", dstUDPAddr, err)
-			s.deleteSession(&udpSession{conn6: yggConn}, flow.key)
+			// No session was stored yet (and none counted), so closing the
+			// gVisor endpoint is all the cleanup needed.
+			yggConn.Close()
 			return
 		}
 
@@ -161,8 +212,12 @@ func (s *Service) handleUDPForward(req *udp.ForwarderRequest, logger *log.Logger
 			// session is always the one whose gVisor endpoint is registered in
 			// the demuxer — i.e. this one — so replace the entry unconditionally.
 			// The stale loops exit on their closed conns and their deletes are
-			// conditional (CompareAndDelete), so they cannot clobber ours.
+			// conditional (CompareAndDelete), so they cannot clobber ours; the
+			// occupancy counter is unchanged because the slot merely changes
+			// which session object it points at.
 			s.sessions.Store(flow.key, sess)
+		} else {
+			s.udpSessions.Add(1)
 		}
 		go s.udpReplyLoop(sess, flow.key)
 		go s.udpForwardLoop(sess, flow.key)
@@ -217,11 +272,14 @@ func (s *Service) udpReplyLoop(sess *udpSession, key sessionKey) {
 
 // deleteSession tears down both legs of a session and removes its map entry.
 // The delete is conditional so a relay loop of a superseded stale session can
-// never remove the entry of the live session that replaced it.
+// never remove the entry (or decrement the occupancy counter) of the live
+// session that replaced it.
 func (s *Service) deleteSession(sess *udpSession, key sessionKey) {
 	sess.conn6.Close()
 	if sess.outConn != nil {
 		sess.outConn.Close()
 	}
-	s.sessions.CompareAndDelete(key, sess)
+	if s.sessions.CompareAndDelete(key, sess) {
+		s.udpSessions.Add(-1)
+	}
 }

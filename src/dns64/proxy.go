@@ -274,7 +274,7 @@ func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string
 	}
 
 	// Cache hit?
-	if cached, ok := p.cache.get(q.Name); ok {
+	if cached, ok := p.cache.get(cacheKeyFor(q)); ok {
 		resp := new(dns.Msg)
 		req.CopyTo(resp)
 		resp.Answer = cached
@@ -311,7 +311,7 @@ func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string
 	if upResp.Rcode == dns.RcodeSuccess {
 		answer = p.filterAAAA(upResp.Answer, z)
 		if containsAAAA(answer) {
-			p.cache.set(q.Name, answer)
+			p.cache.set(cacheKeyFor(q), answer)
 			resp := new(dns.Msg)
 			req.CopyTo(resp)
 			resp.Answer = answer
@@ -382,7 +382,7 @@ func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string
 		}
 		answerWithCNAMEs = append(answerWithCNAMEs, answer...)
 		resp.Answer = answerWithCNAMEs
-		p.cache.set(q.Name, resp.Answer)
+		p.cache.set(cacheKeyFor(q), resp.Answer)
 	}
 
 	resp.Ns = aResp.Ns

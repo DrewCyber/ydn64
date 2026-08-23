@@ -22,21 +22,35 @@ type ZoneConfig struct {
 
 // DNS64Config holds configuration for the embedded DNS64 service.
 type DNS64Config struct {
-	Enable         bool
-	Listen         string
-	Default        string
-	CacheExp       int
-	CachePurge     int
-	InvalidAddress string
-	Zones          []ZoneConfig
+	Enable          bool
+	Listen          string
+	Default         string
+	CacheExp        int
+	CachePurge      int
+	MaxCacheEntries int
+	MaxQueries      int
+	InvalidAddress  string
+	Zones           []ZoneConfig
 }
 
 // NAT64Config holds configuration for the NAT64 service.
 type NAT64Config struct {
-	Enable     bool
-	Pool6      string
-	UDPTimeout int
+	Enable         bool
+	Pool6          string
+	UDPTimeout     int
+	MaxTCPClients  int
+	MaxUDPSessions int
 }
+
+// Default resource-bound values applied when the corresponding keys are
+// unset or non-positive. Any allowed peer can generate unbounded load
+// otherwise, so every limit is deliberately bounded by default.
+const (
+	DefaultDns64MaxCacheEntries   = 4096
+	DefaultDns64MaxQueries        = 512
+	DefaultNat64MaxTCPConnections = 1024
+	DefaultNat64MaxUDPSessions    = 4096
+)
 
 // DefaultIgnoredDstSubnets contains the default IPv4 private, loopback, link-local,
 // and multicast/reserved subnets ignored by NAT64 and DNS64.
@@ -60,18 +74,22 @@ var DefaultIgnoredDstSubnets = []string{
 // Listen, ...) are parsed separately into a ygconfig.NodeConfig and are
 // simply ignored here.
 type AppConfig struct {
-	AllowedSources       []string     `json:"AllowedSources"`
-	IgnoredDstSubnets    []string     `json:"IgnoredDstSubnets"`
-	Nat64Enable          bool         `json:"Nat64Enable"`
-	Nat64Pool            string       `json:"Nat64Pool"`
-	Nat64UdpTimeout      int          `json:"Nat64UdpTimeout"`
-	Dns64Enable          bool         `json:"Dns64Enable"`
-	Dns64Listen          string       `json:"Dns64Listen"`
-	Dns64Default         string       `json:"Dns64Default"`
-	Dns64CacheExpiration int          `json:"Dns64CacheExpiration"`
-	Dns64CachePurge      int          `json:"Dns64CachePurge"`
-	Dns64InvalidAddress  string       `json:"Dns64InvalidAddress"`
-	Dns64Zones           []ZoneConfig `json:"Dns64Zones"`
+	AllowedSources            []string     `json:"AllowedSources"`
+	IgnoredDstSubnets         []string     `json:"IgnoredDstSubnets"`
+	Nat64Enable               bool         `json:"Nat64Enable"`
+	Nat64Pool                 string       `json:"Nat64Pool"`
+	Nat64UdpTimeout           int          `json:"Nat64UdpTimeout"`
+	Nat64MaxTCPConnections    int          `json:"Nat64MaxTCPConnections"`
+	Nat64MaxUDPSessions       int          `json:"Nat64MaxUDPSessions"`
+	Dns64Enable               bool         `json:"Dns64Enable"`
+	Dns64Listen               string       `json:"Dns64Listen"`
+	Dns64Default              string       `json:"Dns64Default"`
+	Dns64CacheExpiration      int          `json:"Dns64CacheExpiration"`
+	Dns64CachePurge           int          `json:"Dns64CachePurge"`
+	Dns64MaxCacheEntries      int          `json:"Dns64MaxCacheEntries"`
+	Dns64MaxConcurrentQueries int          `json:"Dns64MaxConcurrentQueries"`
+	Dns64InvalidAddress       string       `json:"Dns64InvalidAddress"`
+	Dns64Zones                []ZoneConfig `json:"Dns64Zones"`
 }
 
 // ApplyPrivateKeyOverride recomputes Nat64Pool and Dns64Listen, and resets
@@ -122,22 +140,26 @@ func ParseAllowedNets(sources []string) []*net.IPNet {
 // NAT64 returns the NAT64Config view of the merged configuration.
 func (c *AppConfig) NAT64() NAT64Config {
 	return NAT64Config{
-		Enable:     c.Nat64Enable,
-		Pool6:      c.Nat64Pool,
-		UDPTimeout: c.Nat64UdpTimeout,
+		Enable:         c.Nat64Enable,
+		Pool6:          c.Nat64Pool,
+		UDPTimeout:     c.Nat64UdpTimeout,
+		MaxTCPClients:  c.Nat64MaxTCPConnections,
+		MaxUDPSessions: c.Nat64MaxUDPSessions,
 	}
 }
 
 // DNS64 returns the DNS64Config view of the merged configuration.
 func (c *AppConfig) DNS64() DNS64Config {
 	return DNS64Config{
-		Enable:         c.Dns64Enable,
-		Listen:         c.Dns64Listen,
-		Default:        c.Dns64Default,
-		CacheExp:       c.Dns64CacheExpiration,
-		CachePurge:     c.Dns64CachePurge,
-		InvalidAddress: c.Dns64InvalidAddress,
-		Zones:          c.Dns64Zones,
+		Enable:          c.Dns64Enable,
+		Listen:          c.Dns64Listen,
+		Default:         c.Dns64Default,
+		CacheExp:        c.Dns64CacheExpiration,
+		CachePurge:      c.Dns64CachePurge,
+		MaxCacheEntries: c.Dns64MaxCacheEntries,
+		MaxQueries:      c.Dns64MaxConcurrentQueries,
+		InvalidAddress:  c.Dns64InvalidAddress,
+		Zones:           c.Dns64Zones,
 	}
 }
 
@@ -199,6 +221,12 @@ func (c *AppConfig) Validate() error {
 		} else if c.Nat64UdpTimeout < 120 {
 			return fmt.Errorf("Nat64UdpTimeout must not be less than 120 seconds")
 		}
+		if c.Nat64MaxTCPConnections <= 0 {
+			c.Nat64MaxTCPConnections = DefaultNat64MaxTCPConnections
+		}
+		if c.Nat64MaxUDPSessions <= 0 {
+			c.Nat64MaxUDPSessions = DefaultNat64MaxUDPSessions
+		}
 	}
 
 	if c.Dns64Enable {
@@ -228,6 +256,12 @@ func (c *AppConfig) Validate() error {
 		}
 		if c.Dns64CachePurge <= 0 {
 			c.Dns64CachePurge = 600
+		}
+		if c.Dns64MaxCacheEntries <= 0 {
+			c.Dns64MaxCacheEntries = DefaultDns64MaxCacheEntries
+		}
+		if c.Dns64MaxConcurrentQueries <= 0 {
+			c.Dns64MaxConcurrentQueries = DefaultDns64MaxQueries
 		}
 	}
 

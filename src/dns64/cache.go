@@ -8,17 +8,28 @@ import (
 	"github.com/miekg/dns"
 )
 
+// cacheKey identifies a cached answer by question name and qtype. Only
+// AAAA answers are cached today, but keying on the name alone would collide
+// the moment A/PTR caching is ever added.
+type cacheKey struct {
+	name  string
+	qtype uint16
+}
+
 // dnsCache is a TTL cache for DNS answer RR slices.
-// Keys are DNS question names (FQDN strings). Each entry expires after
+// Keys are DNS questions (name + qtype). Each entry expires after
 // min(smallest RR TTL in the answer, configured default expiration), so a
 // short-lived upstream record cannot outlive its TTL just because
 // Dns64CacheExpiration is large. Cache hits return copies whose TTLs are
 // decremented by the time spent in the cache — re-serving an undecremented
-// TTL would let clients pin stale records forever (RFC 2181 §8).
+// TTL would let clients pin stale records forever (RFC 2181 §8). The number
+// of entries is bounded (maxEntries): when full, expired entries are purged
+// first and otherwise an arbitrary entry is evicted.
 type dnsCache struct {
 	mu            sync.RWMutex
-	items         map[string]cacheItem
+	items         map[cacheKey]cacheItem
 	defaultExp    atomic.Int64 // nanoseconds; read/written via Reload for live config reload
+	maxEntries    atomic.Int64 // >0 bounds len(items); reloadable via Reload
 	purgeInterval time.Duration
 	ticker        *time.Ticker // nil if purgeInterval was 0 at construction (no janitor)
 }
@@ -29,12 +40,15 @@ type cacheItem struct {
 	ttl        time.Duration
 }
 
-func newCache(defaultExp, purgeInterval time.Duration) *dnsCache {
+func newCache(defaultExp, purgeInterval time.Duration, maxEntries int) *dnsCache {
 	c := &dnsCache{
-		items:         make(map[string]cacheItem),
+		items:         make(map[cacheKey]cacheItem),
 		purgeInterval: purgeInterval,
 	}
 	c.defaultExp.Store(int64(defaultExp))
+	if maxEntries > 0 {
+		c.maxEntries.Store(int64(maxEntries))
+	}
 	if purgeInterval > 0 {
 		c.ticker = time.NewTicker(purgeInterval)
 		go c.janitor()
@@ -53,18 +67,21 @@ func newCache(defaultExp, purgeInterval time.Duration) *dnsCache {
 // purgeInterval here has no effect — starting a janitor after the fact
 // isn't supported, since that's only a config reload nicety, not a
 // correctness requirement.
-func (c *dnsCache) Reload(defaultExp, purgeInterval time.Duration) {
+func (c *dnsCache) Reload(defaultExp, purgeInterval time.Duration, maxEntries int) {
 	c.defaultExp.Store(int64(defaultExp))
+	if maxEntries > 0 {
+		c.maxEntries.Store(int64(maxEntries))
+	}
 	if c.ticker != nil && purgeInterval > 0 {
 		c.purgeInterval = purgeInterval
 		c.ticker.Reset(purgeInterval)
 	}
 	c.mu.Lock()
-	c.items = make(map[string]cacheItem)
+	c.items = make(map[cacheKey]cacheItem)
 	c.mu.Unlock()
 }
 
-func (c *dnsCache) set(k string, rrs []dns.RR) {
+func (c *dnsCache) set(k cacheKey, rrs []dns.RR) {
 	var exp int64
 	var eff time.Duration
 	if d := c.defaultExp.Load(); d > 0 {
@@ -74,15 +91,45 @@ func (c *dnsCache) set(k string, rrs []dns.RR) {
 		}
 		exp = time.Now().Add(eff).UnixNano()
 	}
+
 	c.mu.Lock()
+	c.makeRoomLocked(k)
 	c.items[k] = cacheItem{value: rrs, expiration: exp, ttl: eff}
 	c.mu.Unlock()
+}
+
+// makeRoomLocked enforces the maxEntries bound before k is inserted.
+// Caller holds mu for writing. Overwriting an existing key needs no new
+// slot; otherwise expired entries are purged first and, if the cache is
+// still full, an arbitrary entry is evicted (map iteration order is
+// randomised in Go).
+func (c *dnsCache) makeRoomLocked(k cacheKey) {
+	max := c.maxEntries.Load()
+	if max <= 0 || int64(len(c.items)) < max {
+		return
+	}
+	if _, updating := c.items[k]; updating {
+		return
+	}
+	now := time.Now().UnixNano()
+	for ek, it := range c.items {
+		if it.expiration > 0 && now > it.expiration {
+			delete(c.items, ek)
+		}
+	}
+	if int64(len(c.items)) < max {
+		return
+	}
+	for ek := range c.items {
+		delete(c.items, ek)
+		break
+	}
 }
 
 // get returns a copy of the cached RRs with TTLs decremented by their time
 // in the cache (clamped at zero). Callers may mutate the result freely; the
 // stored entry stays untouched.
-func (c *dnsCache) get(k string) ([]dns.RR, bool) {
+func (c *dnsCache) get(k cacheKey) ([]dns.RR, bool) {
 	c.mu.RLock()
 	item, ok := c.items[k]
 	c.mu.RUnlock()
@@ -125,6 +172,11 @@ func (c *dnsCache) janitor() {
 		}
 		c.mu.Unlock()
 	}
+}
+
+// cacheKeyFor derives the cache key for a DNS question.
+func cacheKeyFor(q *dns.Question) cacheKey {
+	return cacheKey{name: q.Name, qtype: q.Qtype}
 }
 
 // minRRTTL returns the smallest TTL among rrs (0 when the slice is empty).

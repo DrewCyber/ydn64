@@ -62,7 +62,7 @@ func TestDNS64IgnoredDstSubnets(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	p := &proxy{
-		cache: newCache(300*time.Second, 600*time.Second),
+		cache: newCache(300*time.Second, 600*time.Second, 0),
 	}
 
 	prefix := net.ParseIP("64:ff9b::")
@@ -168,7 +168,7 @@ func TestDNS64ErrorRcodeHandling(t *testing.T) {
 
 	// 2. Set up our proxy instance.
 	p := &proxy{
-		cache: newCache(300*time.Second, 600*time.Second),
+		cache: newCache(300*time.Second, 600*time.Second, 0),
 	}
 
 	prefix := net.ParseIP("64:ff9b::")
@@ -254,7 +254,7 @@ func TestDNS64ErrorRcodeHandling(t *testing.T) {
 
 func TestIPv4OnlyARPALocalAnswering(t *testing.T) {
 	p := &proxy{
-		cache: newCache(300*time.Second, 600*time.Second),
+		cache: newCache(300*time.Second, 600*time.Second, 0),
 	}
 
 	prefix := net.ParseIP("64:ff9b::")
@@ -437,7 +437,7 @@ func TestDNS64NonINQClassAndSyntheticTTL(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	p := &proxy{
-		cache: newCache(300*time.Second, 600*time.Second),
+		cache: newCache(300*time.Second, 600*time.Second, 0),
 	}
 
 	prefix := net.ParseIP("64:ff9b::")
@@ -531,7 +531,7 @@ func TestDNS64NonINQClassAndSyntheticTTL(t *testing.T) {
 // serverAddr, matching the setup used by the other handler tests.
 func newTestProxy(serverAddr string) *proxy {
 	p := &proxy{
-		cache: newCache(300*time.Second, 600*time.Second),
+		cache: newCache(300*time.Second, 600*time.Second, 0),
 	}
 	prefix := net.ParseIP("64:ff9b::")
 	if prefix == nil {
@@ -773,7 +773,7 @@ func TestDNS64CNAMEChainPreservationAndOwnerName(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	p := &proxy{
-		cache: newCache(300*time.Second, 600*time.Second),
+		cache: newCache(300*time.Second, 600*time.Second, 0),
 	}
 
 	prefix := net.ParseIP("64:ff9b::")

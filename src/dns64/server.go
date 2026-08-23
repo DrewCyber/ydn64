@@ -44,6 +44,12 @@ type Service struct {
 	listenAddr  string
 	allowedNets atomic.Pointer[[]*net.IPNet]
 	ns          *netstack.YggdrasilNetstack
+	// querySem bounds concurrent in-flight queries (UDP query goroutines +
+	// DNS-over-TCP connections). When full, new work is shed immediately —
+	// UDP queries get SERVFAIL, TCP connections are closed — rather than
+	// queued. Sized at construction; Dns64MaxConcurrentQueries requires a
+	// restart to change.
+	querySem chan struct{}
 }
 
 // NewService creates a DNS64 Service from configuration.
@@ -57,7 +63,7 @@ func NewService(cfg config.DNS64Config, allowedSources []string, ignoredDstSubne
 	purgeDur := time.Duration(cfg.CachePurge) * time.Second
 
 	p := &proxy{
-		cache: newCache(expDur, purgeDur),
+		cache: newCache(expDur, purgeDur, cfg.MaxCacheEntries),
 		ns:    ns,
 	}
 	p.reload(cfg.Default, ia, buildZones(cfg.Zones), config.ParseIPNets(ignoredDstSubnets))
@@ -67,6 +73,9 @@ func NewService(cfg config.DNS64Config, allowedSources []string, ignoredDstSubne
 		proxy:      p,
 		listenAddr: cfg.Listen,
 		ns:         ns,
+	}
+	if cfg.MaxQueries > 0 {
+		s.querySem = make(chan struct{}, cfg.MaxQueries)
 	}
 	s.allowedNets.Store(&allowed)
 	return s, nil
@@ -85,8 +94,41 @@ func (s *Service) Reload(cfg config.DNS64Config, allowedSources []string, ignore
 	allowed := config.ParseAllowedNets(allowedSources)
 	s.allowedNets.Store(&allowed)
 	s.proxy.reload(cfg.Default, ia, buildZones(cfg.Zones), config.ParseIPNets(ignoredDstSubnets))
-	s.proxy.cache.Reload(time.Duration(cfg.CacheExp)*time.Second, time.Duration(cfg.CachePurge)*time.Second)
+	s.proxy.cache.Reload(time.Duration(cfg.CacheExp)*time.Second, time.Duration(cfg.CachePurge)*time.Second, cfg.MaxCacheEntries)
 	return nil
+}
+
+// tryAcquireQuery reports whether a new query slot is available. Always true
+// when no limit is configured.
+func (s *Service) tryAcquireQuery() bool {
+	if s.querySem == nil {
+		return true
+	}
+	select {
+	case s.querySem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// releaseQuery returns a previously acquired slot.
+func (s *Service) releaseQuery() {
+	if s.querySem != nil {
+		<-s.querySem
+	}
+}
+
+// shedResponse builds the SERVFAIL answer sent when a UDP query is shed at
+// the concurrency limit — an immediate, cheap failure beats silence (client
+// timeout + retry storm).
+func shedResponse(req *dns.Msg) *dns.Msg {
+	resp := new(dns.Msg)
+	resp.Id = req.Id
+	resp.Question = req.Question
+	resp.Response = true
+	resp.Rcode = dns.RcodeServerFailure
+	return resp
 }
 
 // isAllowed reports whether srcIP is in one of the configured allowed-source ranges.
@@ -213,6 +255,15 @@ func (s *Service) serveUDP(conn *gonet.UDPConn, logger *log.Logger) {
 				return
 			}
 
+			if !s.tryAcquireQuery() {
+				logger.Debugf("DNS64: shedding query from %s (concurrency limit)", from)
+				if out, err := shedResponse(req).Pack(); err == nil {
+					_, _ = conn.WriteTo(out, from)
+				}
+				return
+			}
+			defer s.releaseQuery()
+
 			udpSize := defaultUDPSize
 			clientOPT := req.IsEdns0()
 			if clientOPT != nil {
@@ -277,8 +328,16 @@ func (s *Service) serveTCP(listener *gonet.TCPListener, logger *log.Logger) {
 			conn.Close()
 			continue
 		}
+		if !s.tryAcquireQuery() {
+			logger.Debugf("DNS64: shedding TCP connection from %s (concurrency limit)", conn.RemoteAddr())
+			conn.Close()
+			continue
+		}
 
-		go s.serveTCPConn(conn, logger)
+		go func() {
+			defer s.releaseQuery()
+			s.serveTCPConn(conn, logger)
+		}()
 	}
 }
 
