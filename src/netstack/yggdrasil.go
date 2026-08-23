@@ -3,6 +3,7 @@ package netstack
 import (
 	"log"
 	"net"
+	"sync"
 
 	"github.com/yggdrasil-network/yggdrasil-go/src/core"
 	"github.com/yggdrasil-network/yggdrasil-go/src/ipv6rwc"
@@ -18,11 +19,18 @@ import (
 // YggdrasilNIC is a gVisor LinkEndpoint that routes packets through the
 // Yggdrasil network via ipv6rwc.
 type YggdrasilNIC struct {
-	netstack    *YggdrasilNetstack
-	ipv6rwc     *ipv6rwc.ReadWriteCloser
-	dispatcher  stack.NetworkDispatcher
-	readBuf     []byte
-	writeBuf    []byte
+	netstack   *YggdrasilNetstack
+	ipv6rwc    *ipv6rwc.ReadWriteCloser
+	dispatcher stack.NetworkDispatcher
+	readBuf    []byte
+	// writeBufs hands out private MTU-sized scratch buffers to writePacket.
+	// WritePackets is called concurrently (gVisor TCP timer paths, forwarder
+	// answer goroutines, the ctrlPackets flusher below), so a single shared
+	// scratch field would interleave and corrupt outbound frames; buffers are
+	// exclusively owned by one writePacket call at a time instead.
+	writeBufs sync.Pool
+	// ctrlPackets queues zero-payload TCP control frames for asynchronous
+	// writing — see the comment in WritePackets for why.
 	ctrlPackets chan *stack.PacketBuffer
 }
 
@@ -42,9 +50,9 @@ func (s *YggdrasilNetstack) NewYggdrasilNIC(ygg *core.Core, ifMTU uint64) tcpip.
 		netstack:    s,
 		ipv6rwc:     rwc,
 		readBuf:     make([]byte, mtu),
-		writeBuf:    make([]byte, mtu),
 		ctrlPackets: make(chan *stack.PacketBuffer, 100),
 	}
+	nic.initWriteBufs(int(mtu))
 
 	// DeliverLinkPackets makes the NIC hand raw packets — both inbound
 	// deliveries and egress writes — to registered stack.PacketEndpoints,
@@ -123,6 +131,14 @@ func (s *YggdrasilNetstack) NewYggdrasilNIC(ygg *core.Core, ifMTU uint64) tcpip.
 	return nil
 }
 
+// initWriteBufs seeds the writeBufs pool with MTU-sized scratch buffers.
+func (e *YggdrasilNIC) initWriteBufs(mtu int) {
+	e.writeBufs.New = func() any {
+		buf := make([]byte, mtu)
+		return &buf
+	}
+}
+
 // ── gVisor LinkEndpoint interface ────────────────────────────────────────────
 
 func (e *YggdrasilNIC) Attach(dispatcher stack.NetworkDispatcher) { e.dispatcher = dispatcher }
@@ -146,21 +162,23 @@ func (*YggdrasilNIC) Wait() {}
 func (e *YggdrasilNIC) writePacket(pkt *stack.PacketBuffer) tcpip.Error {
 	// The packet parser may panic on malformed zero-payload packets.
 	defer func() { recover() }() //nolint:errcheck
+	bufp := e.writeBufs.Get().(*[]byte)
+	defer e.writeBufs.Put(bufp)
+	buf := *bufp
 	vv := pkt.ToView()
-	n, err := vv.Read(e.writeBuf)
+	n, err := vv.Read(buf)
 	if err != nil {
 		return &tcpip.ErrAborted{}
 	}
-	if _, err := e.ipv6rwc.Write(e.writeBuf[:n]); err != nil {
+	if _, err := e.ipv6rwc.Write(buf[:n]); err != nil {
 		return &tcpip.ErrAborted{}
 	}
 	return nil
 }
 
 func (e *YggdrasilNIC) WritePackets(list stack.PacketBufferList) (int, tcpip.Error) {
-	var i int
-	var tcpErr tcpip.Error
-	for i, pkt := range list.AsSlice() {
+	written := 0
+	for _, pkt := range list.AsSlice() {
 		if pkt.Data().Size() == 0 && pkt.Network().TransportProtocol() == tcp.ProtocolNumber {
 			// Zero-payload TCP control packets (SYN, SYN-ACK, pure ACK, FIN,
 			// RST) are queued to a background writer instead of being written
@@ -173,17 +191,22 @@ func (e *YggdrasilNIC) WritePackets(list stack.PacketBufferList) (int, tcpip.Err
 			pkt.IncRef()
 			select {
 			case e.ctrlPackets <- pkt:
+				// Ownership moved to the flusher; count as written, matching
+				// how a driver reports frames handed off to a TX ring.
+				written++
 			default:
 				pkt.DecRef()
+				// Dropped because the queue was full: not written.
 			}
 			continue
 		}
-		if tcpErr = e.writePacket(pkt); tcpErr != nil {
+		if tcpErr := e.writePacket(pkt); tcpErr != nil {
 			log.Println("yggdrasil NIC write error:", tcpErr)
-			return i - 1, tcpErr
+			return written, tcpErr
 		}
+		written++
 	}
-	return i, nil
+	return written, nil
 }
 
 func (e *YggdrasilNIC) WriteRawPacket(*stack.PacketBuffer) tcpip.Error {

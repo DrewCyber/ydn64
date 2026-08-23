@@ -39,6 +39,19 @@ Severity: **P0** fix now · **P1** fix soon · **P2** should fix · **P3** polis
   netstack constructor/CUBIC).
 - Docs refreshed: AGENTS.md test guidance/context inventory/harness topology,
   README deviations wording.
+- **[2026-08-23] R1 + R3 fixed** in `src/netstack/yggdrasil.go`: the shared
+  `writeBuf` scratch field was replaced by a `sync.Pool` of MTU-sized buffers
+  acquired inside `writePacket` for the duration of one call (concurrent
+  gVisor TCP-timer / DNS64-answer / ctrlPackets-flusher writers can no longer
+  interleave on shared memory), and `WritePackets` now keeps an explicit
+  `written` counter — success returns the packet count, failure returns
+  written-so-far + error (never `-1`); async-queued control frames count as
+  written once accepted into `ctrlPackets`, queue-full drops are not counted.
+  Covered by `src/netstack/yggdrasil_test.go`: `TestWritePacketsConcurrentNoRace`
+  (8 goroutines × 250 batches vs. the flusher — reproduces a `DATA RACE` in
+  `WritePackets` under `-race` against the old code), plus contract tests for
+  success counts, `(0, err)` first-packet failure, partial counts on mid-batch
+  failure, and queue-full drop accounting (all fail against the old code).
 
 ---
 
@@ -46,16 +59,7 @@ Severity: **P0** fix now · **P1** fix soon · **P2** should fix · **P3** polis
 
 ### P0
 
-#### R1 · Data race on the shared `writeBuf` corrupts outbound packets
-`src/netstack/yggdrasil.go`: every outbound packet serialises through ONE
-unsynchronised scratch field (`vv.Read(e.writeBuf)` then
-`ipv6rwc.Write(e.writeBuf[:n])`), written concurrently by DNS64 answer
-goroutines, gVisor TCP timer paths and the `ctrlPackets` flusher. Interleaved
-writes can emit corrupted frames. `-race` never sees it because this path has
-no concurrency test yet.
-Fix: per-call local buffer or `sync.Pool` acquired inside `writePacket`
-(no packet bytes outside a single call frame); add a two-goroutine × many-writes
-regression test under `-race`.
+#### R1 · ~~Data race on the shared `writeBuf` corrupts outbound packets~~ — FIXED 2026-08-23 (see §1)
 
 #### R2 · Upstream DNS queries reuse the client-supplied transaction ID
 `src/dns64/proxy.go` — every query builder does `req.CopyTo(upReq)` and sends
@@ -66,12 +70,7 @@ randomise `upReq.Id = dns.Id()`, restore the client ID on every return path;
 optionally add 0x20 qname case randomisation with response verification.
 (Status mirrored in RFCs.txt under RFC 5452.)
 
-#### R3 · `WritePackets` violates its contract: returns 0 on success, −1 possible on failure
-`src/netstack/yggdrasil.go` — classic shadowing: outer `i` never incremented
-(success reports 0 packets; gVisor TX stats garbage), failure path returns
-failing-index−1 (−1 when the first packet fails). Rewrite with a `written`
-counter; decide/document whether async-queued control frames count as written.
-Fix together with R1.
+#### R3 · ~~`WritePackets` violates its contract: returns 0 on success, −1 possible on failure~~ — FIXED 2026-08-23 (see §1, fixed together with R1)
 
 ### P1
 
@@ -209,7 +208,7 @@ relaying to the v4 internet. Cheap to add using the existing
 
 | Step | Items | Why | Effort |
 |---|---|---|---|
-| 1 | R8 (CI) + R1 + R3 | Gates first; the two netstack bugs in one pass; R1 needs its -race test to matter | small–medium |
+| 1 | R8 (CI) + ~~R1 + R3~~ (done 2026-08-23) | Gates first; the two netstack bugs in one pass; R1 needs its -race test to matter | small–medium |
 | 2 | R2 (TXID) | ~10 lines, closes the top security hole | small |
 | 3 | R7 + lastSeenNs-style mechanical races | trivial, removes all known races | small |
 | 4 | R4 staged (cache caps → semaphores → session caps) + R4b | biggest stability win under adversarial load | medium |
