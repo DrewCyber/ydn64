@@ -191,7 +191,10 @@ RFC 3596 — DNS Extensions to Support IP Version 6                     [DONE]
 
 RFC 6891 — Extension Mechanisms for DNS (EDNS(0))                  [PARTIAL]
     Obsoletes RFC 2671, which RFC 6147 §5.4 cites. UDP payload size
-    negotiation and truncation implemented (§6.2.3-6.2.5).     Outstanding:
+    negotiation and truncation implemented (§6.2.3-6.2.5): classic
+    non-OPT queries are answered within 512 bytes (TC beyond), advertised
+    sizes below 512 are treated as 512, and larger advertisements are
+    clamped at 4096.     Outstanding:
       - EDNS(0) options (e.g., COOKIE, CLIENT-SUBNET)            [TODO]
       - DNSSEC support (DO bit, CD bit) — see RFC 6147 §5.5      [DONE]
         (minimum viable subset; ydn64 does not validate)

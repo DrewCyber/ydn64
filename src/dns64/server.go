@@ -26,10 +26,11 @@ const (
 	// Unbound, etc.) apply to their own TCP listeners.
 	dnsTCPIdleTimeout = 10 * time.Second
 
-	// defaultUDPSize is the assumed UDP payload size for clients that do not
-	// send EDNS(0) OPT records. RFC 6891 §6.2.5 recommends 1232 bytes as a
-	// safe minimum that avoids fragmentation on typical paths.
-	defaultUDPSize = 1232
+	// legacyMaxMsgSize is the largest DNS-over-UDP message a server may
+	// assume every client accepts without EDNS(0) negotiation; larger
+	// responses must set TC and be retried over TCP
+	// (RFC 1035 §2.3.4, RFC 6891 §6.2.5).
+	legacyMaxMsgSize = 512
 
 	// maxUDPSize caps the negotiated UDP payload size even when clients
 	// advertise larger buffers — balances respecting client preferences
@@ -37,6 +38,30 @@ const (
 	// defaults.
 	maxUDPSize = 4096
 )
+
+// negotiateUDPSize returns the maximum UDP message size ydn64 may use when
+// answering a query carrying the given client OPT record (nil for classic
+// queries), per RFC 6891 §6.2.5:
+//
+//   - no OPT: legacyMaxMsgSize (512). Assuming 1232 for such clients made
+//     ydn64 emit untruncated datagrams past the classic limit, which stubs
+//     without EDNS support have no obligation to accept; 512+TC is the
+//     interoperable choice.
+//   - advertised sizes below 512 are treated as 512 ("values lower than
+//     512 MUST be treated as equal to 512") rather than honoured literally.
+//   - otherwise the advertisement, clamped at maxUDPSize.
+func negotiateUDPSize(clientOPT *dns.OPT) int {
+	size := legacyMaxMsgSize
+	if clientOPT != nil {
+		if s := int(clientOPT.UDPSize()); s > size {
+			size = s
+		}
+		if size > maxUDPSize {
+			size = maxUDPSize
+		}
+	}
+	return size
+}
 
 // Service is the embedded DNS64 server.
 type Service struct {
@@ -264,18 +289,8 @@ func (s *Service) serveUDP(conn *gonet.UDPConn, logger *log.Logger) {
 			}
 			defer s.releaseQuery()
 
-			udpSize := defaultUDPSize
 			clientOPT := req.IsEdns0()
-			if clientOPT != nil {
-				clientSize := int(clientOPT.UDPSize())
-				if clientSize > maxUDPSize {
-					udpSize = maxUDPSize
-				} else if clientSize > defaultUDPSize {
-					udpSize = clientSize
-				} else if clientSize > 0 {
-					udpSize = clientSize
-				}
-			}
+			udpSize := negotiateUDPSize(clientOPT)
 
 			resp := s.proxy.handle(req)
 

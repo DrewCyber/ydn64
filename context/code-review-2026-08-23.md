@@ -116,6 +116,17 @@ Severity: **P0** fix now · **P1** fix soon · **P2** should fix · **P3** polis
   Covered by new tests incl. `TestGenconfOutputPassesValidation`, which
   round-trips `-genconf` output through hjson + `Validate()` to guard
   against template drift.
+- **[2026-08-23] R10 fixed** in `src/dns64/server.go`: negotiation logic
+  extracted into `negotiateUDPSize(clientOPT)` and given RFC 6891 §6.2.5
+  semantics — classic non-OPT queries are now answered within 512 bytes
+  (TC beyond; previously ydn64 assumed 1232 for them), advertised sizes
+  below 512 are treated as 512 instead of honoured literally, and larger
+  advertisements clamp at 4096 as before. TC/truncation behaviour is
+  unchanged. The three tests that duplicated the production logic inline
+  (`TestEDNS0UDPSizeNegotiation`, `TestEDNS0Truncation`,
+  `TestEDNS0EdgeCases`) now call the real function (new floor cases:
+  0/1/100/511 → 512); RFCs.txt RFC 6891 entry updated. Harness case 07
+  passes unchanged.
 
 ---
 
@@ -158,13 +169,7 @@ any IPv6 address, forwarders never format-checked, empty `AllowedSources`
 silent deny-all logged only at Debug. All four closed; see §1 for details.
 The RFC 6052 variable-length alternative remains tracked in RFCs.txt.
 
-#### R10 · EDNS(0) deviations from RFC 6891
-`server.go`: non-EDNS clients get up-to-1232-byte responses (classic limit is
-512+TC; BIND/Unbound cap at 512); sub-512 client advertisements honoured
-literally (MUST treat <512 as 512); `TestEDNS0EdgeCases` duplicates production
-negotiation logic inline instead of testing the real function. Extract
-`negotiateUDPSize(clientOPT) int`: no OPT→512; <512→512; else clamp
-[client,4096]. Keep existing TC/truncate behaviour.
+#### R10 · ~~EDNS(0) deviations from RFC 6891~~ — FIXED 2026-08-23 (see §1)
 
 #### R11 · NIC read loop exits permanently and near-silently on first error
 `yggdrasil.go`: one transient `ipv6rwc.Read` error logs to stderr (stdlib log —
@@ -246,6 +251,6 @@ relaying to the v4 internet. Cheap to add using the existing
 | 3 | ~~R7 + lastSeenNs-style mechanical races~~ (done; R7 publish order + atomic lastSeenNs in tree) | trivial, removes all known races | small |
 | 4 | R4 staged (~~cache caps → semaphores → session caps~~ done 2026-08-23; per-source token buckets open) + ~~R4b~~ (TTL semantics done 2026-08-23) | biggest stability win under adversarial load | medium |
 | 5 | ~~R9 (/96 + forwarder validation + empty-allowlist warning)~~ (done 2026-08-23) | silent misconfigs become startup errors | small |
-| 6 | R10 (EDNS normalisation + real-function test) | interop correctness | small |
+| 6 | ~~R10 (EDNS normalisation + real-function test)~~ (done 2026-08-23) | interop correctness | small |
 | 7 | R5 (ICMP ID rewrite), R16 (ICMP-path validation), R11/R12 | robustness | medium |
 | 8 | R13–R15, R17, R18 | hygiene sweep | medium |
