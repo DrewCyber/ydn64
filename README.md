@@ -222,9 +222,9 @@ the `["."]` zone that `-genconf` produces.
 ### Architectural limitations
 
 These follow from `ydn64` being a **TUN-less userspace transport proxy**
-rather than a packet translator. TCP is terminated inside the gVisor netstack
-and re-originated over an ordinary OS socket; UDP and ICMP Echo are relayed
-the same way. There is no IP-header translation anywhere in the path.
+rather than a packet translator. TCP and UDP are terminated inside the gVisor
+netstack and re-originated over ordinary OS sockets; ICMP Echo is translated
+via a raw socket. There is no IP-header translation anywhere in the path.
 
 - **No RFC 7915 header translation.** Traffic Class/DSCP, ECN, and Hop
   Limit ↔ TTL are not carried across the translator; synthesised IPv6 replies

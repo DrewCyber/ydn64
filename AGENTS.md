@@ -33,8 +33,15 @@ go build ./...           # plain build without version stamping, still fine for 
 go vet ./...
 ```
 
-There are currently **no `_test.go` files** in this repo. If you add tests,
-run them with `go test ./...`.
+Unit tests live beside the code as `_test.go` files (`src/config`,
+`src/dns64`, `src/nat64`, `src/netstack`) and run with:
+
+```sh
+go test -race -count=1 ./...
+```
+
+The race detector matters here: services spawn goroutines (relays, cleanup
+tickers, stats loops) and past data races were caught only with `-race`.
 
 `./build` is a **shell script**, not a directory — don't confuse it with a
 `build/` output directory. The compiled binary is written to `./ydn64` in the
@@ -116,9 +123,10 @@ When changing the config schema:
 ```
 cmd/ydn64/main.go       CLI entry point, wiring: core → admin → multicast → netstack → nat64/dns64
 src/config/             config.go (load/validate), generate.go (-genconf template)
-src/netstack/           gVisor stack wrapper bound to Yggdrasil's ipv6rwc
-src/nat64/              NAT64 service: packet.go, service.go, tcp.go, udp.go, icmp.go
+src/netstack/           gVisor stack wrapper bound to Yggdrasil's ipv6rwc; tap.go+pcap.go (debug packet tap)
+src/nat64/              NAT64 service: packet.go, service.go, tcp.go, udp.go, icmp.go, stats.go
 src/dns64/              DNS64 service: server.go, proxy.go, cache.go, zones.go
+test/                   podman black-box harness (see below); test/gen (config generator), test/tools/udpecho
 context/                design notes — see caveat below
 tmp/                    git-ignored scratch space for local test runs
 Dockerfile              production multi-arch image (not test/Containerfile.ydn64, which is test-harness-only)
@@ -131,38 +139,37 @@ docker-entrypoint.sh    generates ydn64.conf on first run if $YDN64_CONFIG is mi
 ### Container env var overrides
 
 `cmd/ydn64/main.go` applies `YDN64_PRIVATE_KEY` / `YDN64_PEERS` /
-`YDN64_ALLOWED_SOURCES` environment variables as overrides on top of the
-loaded config file, immediately after `config.Load(...)` and before the
-Yggdrasil core is constructed. `YDN64_PRIVATE_KEY` (hex-encoded ed25519
-private key) is applied first: it replaces `ygCfg.PrivateKey`, regenerates
-`ygCfg.Certificate` via `GenerateSelfSignedCertificate()` (required — the
-`tls.Certificate` passed to `core.New` is what actually determines node
-identity, not `PrivateKey` alone), and calls
-`AppConfig.ApplyPrivateKeyOverride(...)` (in
-[src/config/config.go](src/config/config.go)) to recompute `Nat64Pool` and
-`Dns64Listen` and reset `Dns64Zones` to the single default synthesis zone —
-addresses are derived via `config.DeriveFromPrivateKey` (in
-[src/config/generate.go](src/config/generate.go), shared with `-genconf`).
-`YDN64_PEERS` must be set before `core.New`; `YDN64_ALLOWED_SOURCES` is
-re-validated via `AppConfig.Validate()`. This exists specifically for the
-Docker image (see [docker-entrypoint.sh](docker-entrypoint.sh) and README's
-"Running with Docker" section) so a container can boot from a freshly
-`-genconf`'d file — or with no config file/volume at all when all three vars
-are set — without hand-editing a mounted config. Values are comma/whitespace
-separated for the list-valued vars (`splitEnvList` in main.go). `-genconf`
-itself also reads these same three env vars (via
-`config.GenerateOverrides`) to bake them directly into the generated file.
-If you add more overridable fields, follow the same pattern rather than
-shelling out to sed against the mounted HJSON file.
+`YDN64_ALLOWED_SOURCES` as overrides on top of the loaded config file,
+immediately after `config.Load(...)` and before the Yggdrasil core is
+constructed; `-genconf` reads the same three via `config.GenerateOverrides`.
+User-facing behavior is documented in README's "Running with Docker" — here
+only the mechanics that matter when changing code:
 
-### `context/` caveat
+- `YDN64_PRIVATE_KEY` (hex ed25519) replaces `ygCfg.PrivateKey`, then MUST be
+  followed by `GenerateSelfSignedCertificate()` — the `tls.Certificate`
+  passed to `core.New` determines node identity, not `PrivateKey` alone — and
+  `AppConfig.ApplyPrivateKeyOverride(...)` to recompute `Nat64Pool`,
+  `Dns64Listen`, and reset `Dns64Zones` (addresses derive via
+  `config.DeriveFromPrivateKey`, shared with `-genconf`).
+- `YDN64_PEERS` must be set before `core.New`; `YDN64_ALLOWED_SOURCES` is
+  re-validated via `AppConfig.Validate()`. List values are comma/whitespace
+  separated (`splitEnvList` in main.go).
+- If you add more overridable fields, follow this pattern rather than shelling
+  out to sed against the mounted HJSON file.
 
-- [context/improvement.txt](context/improvement.txt) — **stale**: an early DNS64/NAT64 design note using a sectioned TOML (`[nat64]`/`[dns64]`/`[dns64.<zone>]`) layout with `snake_case` keys. The actual config is a single flat HJSON file with `PascalCase` keys and a `Dns64Zones` array (see [src/config/generate.go](src/config/generate.go) or [README.md](README.md)). Useful for the *behavioral* intent (NXDOMAIN fallback, zone matching rules) but don't follow its config syntax.
-- This is currently the only file under `context/` — earlier drafts of this
-  doc referenced `context/general-idea.txt` and `context/ydn64.conf.example`,
-  but those have since been removed from the repo; the authoritative config
-  reference now lives in `src/config/generate.go`'s inline comments and
-  README.md's "Configuration" section.
+### `context/` contents
+
+- [RFCs.txt](context/RFCs.txt) — authoritative per-requirement RFC conformance
+  status (referenced by README's "Standards conformance" section).
+- [gvisor-notes.md](context/gvisor-notes.md) — condensed outcomes of the 2026-08
+  gVisor migration: CUBIC decision + benchmarks, T7 firewall rejection
+  rationale, and why gVisor upgrades are blocked upstream.
+- [sighup-reload.md](context/sighup-reload.md) — design note for the SIGHUP
+  live config reload path.
+- [dns64-parameters.txt](context/dns64-parameters.txt) — DNS64 parameter notes.
+- Dated snapshots (`code-audit-*`, `code-review-*`, `rfc-conformance-*`) are
+  point-in-time review artifacts; they describe the code as of their date and
+  may be stale.
 
 
 ## Changelog
@@ -192,19 +199,20 @@ one should be added), and add it under the `## [Unreleased]` heading.
 ## Black-box test harness (`test/`)
 
 A podman-based black-box integration test harness lives in `test/` (not
-covered by `go test`). Topology: an IPv4-only `target` container, an `A`
-container running this repo's `ydn64` binary (bridged to both networks), and
-a `B` container running upstream `yggdrasil-go` with a real TUN device on an
-`--internal` (no-egress) Yggdrasil-only network — simulating a real client
-that only has Yggdrasil connectivity and must reach the IPv4 target through
-A's NAT64/DNS64.
+covered by `go test`). Topology: an `A` container running this repo's
+`ydn64` binary on two networks — an `--internal` Yggdrasil-only `yggnet`
+where a `B` container runs upstream `yggdrasil-go` with a real TUN device
+(simulating a real client with only Yggdrasil connectivity), plus an
+egressnet NAT'd bridge giving only A real internet reachability (real DNS
+forwarders, real Yggdrasil peers, real-world targets like dns.google). There
+is no local fake IPv4 target container.
 
 ```sh
 cd test
 ./run.sh all      # build images, start containers, wait for peering, run every script in cases/
 ./run.sh test      # same, skipping an explicit rebuild if images already exist
 ./run.sh down      # stop + remove containers (run before re-testing after code changes)
-./run.sh logs a    # tail podman logs (stderr) for container a/b/target
+./run.sh logs a    # tail podman logs (stderr) for container a or b
 ```
 
 - Generated configs/logs live in `test/.run/` (git-ignored) — e.g.
@@ -287,6 +295,12 @@ Read this before touching `src/netstack/netstack.go` or
   guessing from symptoms — e.g. `transport/tcp/forwarder.go` and
   `transport/tcp/accept.go` (`performHandshake`) make the blocking/timeout
   behavior explicit.
+- **The gVisor pin is deliberate.** The TCP transport factory is
+  `NewProtocolCUBIC` (not the gVisor Reno default). Do not bump
+  `gvisor.dev/gvisor` casually: releases after 2025-08-20 don't compile via
+  plain Go modules (missing Bazel-generated files + a bad test-package name
+  in `pkg/tcpip/stack`) — see [context/gvisor-notes.md](context/gvisor-notes.md)
+  for the assessment and options.
 - `SetPacketInterceptor` on the netstack only supports **one** registered
   callback. NAT64's interceptor (`Service.interceptPacket` in
   `src/nat64/service.go`) handles **ICMPv6 only** (next-header byte
