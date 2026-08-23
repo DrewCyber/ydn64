@@ -186,7 +186,9 @@ func (s *Service) handleUDPForward(req *udp.ForwarderRequest, logger *log.Logger
 
 	yggConn := gonet.NewUDPConn(&wq, ep)
 
+	s.drainWG.Add(1)
 	go func() {
+		defer s.drainWG.Done()
 		dstUDPAddr := &net.UDPAddr{
 			IP:   net.IP(flow.key.dstAddr[:]),
 			Port: int(flow.key.dstPort),

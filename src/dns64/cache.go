@@ -26,12 +26,11 @@ type cacheKey struct {
 // of entries is bounded (maxEntries): when full, expired entries are purged
 // first and otherwise an arbitrary entry is evicted.
 type dnsCache struct {
-	mu            sync.RWMutex
-	items         map[cacheKey]cacheItem
-	defaultExp    atomic.Int64 // nanoseconds; read/written via Reload for live config reload
-	maxEntries    atomic.Int64 // >0 bounds len(items); reloadable via Reload
-	purgeInterval time.Duration
-	ticker        *time.Ticker // nil if purgeInterval was 0 at construction (no janitor)
+	mu         sync.RWMutex
+	items      map[cacheKey]cacheItem
+	defaultExp atomic.Int64 // nanoseconds; read/written via Reload for live config reload
+	maxEntries atomic.Int64 // >0 bounds len(items); reloadable via Reload
+	ticker     *time.Ticker // nil if purgeInterval was 0 at construction (no janitor)
 }
 
 type cacheItem struct {
@@ -42,8 +41,7 @@ type cacheItem struct {
 
 func newCache(defaultExp, purgeInterval time.Duration, maxEntries int) *dnsCache {
 	c := &dnsCache{
-		items:         make(map[cacheKey]cacheItem),
-		purgeInterval: purgeInterval,
+		items: make(map[cacheKey]cacheItem),
 	}
 	c.defaultExp.Store(int64(defaultExp))
 	if maxEntries > 0 {
@@ -73,7 +71,6 @@ func (c *dnsCache) Reload(defaultExp, purgeInterval time.Duration, maxEntries in
 		c.maxEntries.Store(int64(maxEntries))
 	}
 	if c.ticker != nil && purgeInterval > 0 {
-		c.purgeInterval = purgeInterval
 		c.ticker.Reset(purgeInterval)
 	}
 	c.mu.Lock()

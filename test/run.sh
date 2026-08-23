@@ -101,7 +101,12 @@ cmd_up() {
   cmd_down
 
   log "starting A (ydn64)..."
+  # The image defaults to a non-root USER (UID 10001); the harness mounts a
+  # host-owned directory at /work and writes the log there, so run A as root
+  # explicitly. Production deployments should instead keep the non-root
+  # default and make the mounted volume writable by UID 10001.
   $PODMAN run -d --name "$CT_A" \
+    --user 0:0 \
     --network "${NET_YGG}:ip=${IP_A_YGG}" \
     --cap-add=NET_RAW \
     -v "$RUN_DIR:/work:Z" \

@@ -30,7 +30,7 @@ func parseIA(s string) (InvalidAddress, error) {
 	case "discard":
 		return IADiscard, nil
 	default:
-		return IAIgnore, fmt.Errorf("unknown invalid_address value %q", s)
+		return IAIgnore, fmt.Errorf("unknown Dns64InvalidAddress value %q (want \"ignore\", \"process\", or \"discard\")", s)
 	}
 }
 
@@ -74,12 +74,12 @@ func buildZones(cfgZones []config.ZoneConfig) []zone {
 	return out
 }
 
-// matchZone finds the most-specific zone for the given FQDN (already lowercased,
-// trailing dot included).  Returns nil if no zone matches.
-//
-// Priority:
-//  1. Exact domain match or subdomain of a listed domain (most specific first).
-//  2. A zone with domains = ["."] acts as the catch-all default.
+// matchZone finds the zone for the given FQDN (already lowercased, trailing
+// dot included). Zones are evaluated in CONFIG ORDER: the first zone whose
+// domain list contains an exact match or suffix of fqdn wins — so list more
+// specific zones before broader ones. A zone with domains = ["."] acts as
+// the catch-all default and is only consulted after every other zone has
+// been checked. Returns nil if no zone matches.
 func matchZone(zones []zone, fqdn string) *zone {
 	// fqdn comes in as "foo.bar.com." — strip the trailing dot for matching.
 	name := strings.TrimSuffix(strings.ToLower(fqdn), ".")

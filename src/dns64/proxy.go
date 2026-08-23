@@ -478,7 +478,10 @@ func (p *proxy) synthesiseFromA(rrs []dns.RR, fallbackName string, z *zone, maxT
 				// treat 0.0.0.0 like a normal address → synthesise pool6::0.0.0.0
 			case IAProcess:
 				// 0.0.0.0 → translate to [::]
-				rr, _ := dns.NewRR(fmt.Sprintf("%s %d IN AAAA ::", ownerName, ttl))
+				rr, err := dns.NewRR(fmt.Sprintf("%s %d IN AAAA ::", ownerName, ttl))
+				if err != nil || rr == nil {
+					continue // unparsable owner name: drop rather than emit a nil RR
+				}
 				out = append(out, rr)
 				continue
 			}
@@ -489,8 +492,10 @@ func (p *proxy) synthesiseFromA(rrs []dns.RR, fallbackName string, z *zone, maxT
 		}
 
 		synth := makeSynthesisedAAAA(z.prefix, ipv4)
-		rr, _ := dns.NewRR(fmt.Sprintf("%s %d IN AAAA %s", ownerName, ttl, synth.String()))
-		if rr != nil {
+		// Owner names here come from validated question/answer names, so an
+		// error is effectively impossible — but never append a nil RR.
+		rr, err := dns.NewRR(fmt.Sprintf("%s %d IN AAAA %s", ownerName, ttl, synth.String()))
+		if err == nil && rr != nil {
 			out = append(out, rr)
 		}
 	}
@@ -553,10 +558,11 @@ func (p *proxy) handlePTR(req *dns.Msg, q *dns.Question, z *zone, server string)
 		answer := make([]dns.RR, 0, len(resp.Answer))
 		for _, rr := range resp.Answer {
 			if ptr, ok := rr.(*dns.PTR); ok {
-				newRR, _ := dns.NewRR(origQuestion[0].Name + " IN PTR " + ptr.Ptr)
-				if newRR != nil {
-					answer = append(answer, newRR)
+				newRR, err := dns.NewRR(origQuestion[0].Name + " IN PTR " + ptr.Ptr)
+				if err != nil || newRR == nil {
+					continue // drop unparsable PTR rewrites instead of nil RRs
 				}
+				answer = append(answer, newRR)
 			}
 		}
 		resp.Answer = answer

@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+	"time"
 	"unicode"
 
 	"github.com/gologme/log"
@@ -118,6 +119,7 @@ func main() {
 	// ── Logger setup ─────────────────────────────────────────────────────────
 
 	var logger *log.Logger
+	var logOpenErr error
 	switch *logto {
 	case "stdout":
 		logger = log.New(os.Stdout, "", log.Flags())
@@ -126,13 +128,16 @@ func main() {
 			logger = log.New(sl, "", log.Flags()&^(log.Ldate|log.Ltime))
 		}
 	default:
-		if fd, err := os.OpenFile(*logto, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-			logger = log.New(fd, "", log.Flags())
+		fd, err := os.OpenFile(*logto, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			logOpenErr = err
+			break
 		}
+		logger = log.New(fd, "", log.Flags())
 	}
 	if logger == nil {
 		logger = log.New(os.Stdout, "", log.Flags())
-		logger.Warnln("logging destination unavailable, falling back to stdout")
+		logger.Warnf("logging destination %q unavailable (%v), falling back to stdout", *logto, logOpenErr)
 	}
 	setLogLevel(*loglevel, logger)
 
@@ -350,6 +355,18 @@ func main() {
 	if packetTap != nil {
 		packetTap.Close()
 	}
+
+	// Bounded drain of in-flight per-flow work (proxied connections, relay
+	// loops, DNS queries) so cancellation doesn't cut answers mid-flight;
+	// session cleanup has already closed their transports above via ctx.
+	const drainDeadline = 5 * time.Second
+	if nat64Svc != nil {
+		nat64Svc.Drain(drainDeadline)
+	}
+	if dns64Svc != nil {
+		dns64Svc.Drain(drainDeadline)
+	}
+
 	if n.multicast != nil {
 		if err := n.multicast.Stop(); err != nil {
 			logger.Warnf("multicast stop: %v", err)
@@ -416,18 +433,22 @@ func reloadConfig(
 		logger.Warnf("config reload: Dns64Listen change (%q → %q) requires a restart, ignoring", runningDNS64Cfg.Listen, newDNS64Cfg.Listen)
 	}
 
+	// Apply DNS64 first: its Reload can reject a bad new config, and failing
+	// before NAT64's swap keeps the running services consistent instead of
+	// half-reloaded. A brief mixed-policy window between the two swaps is
+	// unavoidable without cross-service atomicity.
+	if dns64Svc != nil {
+		if err := dns64Svc.Reload(newDNS64Cfg, appCfg.AllowedSources, appCfg.IgnoredDstSubnets); err != nil {
+			logger.Warnf("DNS64 config reload failed: %v", err)
+			return
+		}
+	}
 	if nat64Svc != nil {
 		nat64Svc.Reload(newNat64Cfg, appCfg.AllowedSources, appCfg.IgnoredDstSubnets)
 		// Immediate gVisor stack-stats dump alongside the reload — handy for
 		// correlating traffic with a config change without waiting for the
 		// next 60s tick (only meaningful at -loglevel debug).
 		nat64Svc.DumpStats(logger)
-	}
-	if dns64Svc != nil {
-		if err := dns64Svc.Reload(newDNS64Cfg, appCfg.AllowedSources, appCfg.IgnoredDstSubnets); err != nil {
-			logger.Warnf("DNS64 config reload failed: %v", err)
-			return
-		}
 	}
 
 	logger.Printf("config reloaded  sources=%v", appCfg.AllowedSources)

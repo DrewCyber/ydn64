@@ -66,6 +66,11 @@ var DefaultIgnoredDstSubnets = []string{
 	"224.0.0.0/4",
 	"240.0.0.0/4",
 	"255.255.255.255/32",
+	// IANA special-purpose ranges (RFC 6890): benchmarking, 6to4 relay
+	// legacy prefix, and the port-control protocol anycast range.
+	"192.0.0.0/24",
+	"198.18.0.0/15",
+	"192.88.99.0/24",
 }
 
 // AppConfig holds the ydn64-specific (NAT64/DNS64) settings. It is decoded

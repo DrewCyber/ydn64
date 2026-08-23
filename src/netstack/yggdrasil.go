@@ -2,6 +2,7 @@ package netstack
 
 import (
 	"net"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -230,9 +231,16 @@ func (*YggdrasilNIC) SetLinkAddress(tcpip.LinkAddress) {}
 
 func (*YggdrasilNIC) Wait() {}
 
-func (e *YggdrasilNIC) writePacket(pkt *stack.PacketBuffer) tcpip.Error {
-	// The packet parser may panic on malformed zero-payload packets.
-	defer func() { recover() }() //nolint:errcheck
+func (e *YggdrasilNIC) writePacket(pkt *stack.PacketBuffer) (retErr tcpip.Error) {
+	// The packet parser may panic on malformed zero-payload packets. A bare
+	// recover here would silently report success (nil error return), so the
+	// panic value is logged with a stack trace and converted into an error.
+	defer func() {
+		if r := recover(); r != nil {
+			e.netstack.logfLocked("yggdrasil NIC writePacket panic recovered: %v\n%s", r, debug.Stack())
+			retErr = &tcpip.ErrAborted{}
+		}
+	}()
 	bufp := e.writeBufs.Get().(*[]byte)
 	defer e.writeBufs.Put(bufp)
 	buf := *bufp

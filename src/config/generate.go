@@ -55,10 +55,9 @@ func DeriveFromPrivateKey(privKey ed25519.PrivateKey) (nodeIP string, pool6CIDR 
 // container started with all three variables set produce a fully
 // pre-configured config file via `-genconf` with no further editing.
 type GenerateOverrides struct {
-	PrivateKeyHex     string   // hex-encoded ed25519 private key; empty = generate a new random key
-	Peers             []string // empty = no peers (Peers: [])
-	AllowedSources    []string // empty = placeholder example entry
-	IgnoredDstSubnets []string // empty = default ignored subnets
+	PrivateKeyHex  string   // hex-encoded ed25519 private key; empty = generate a new random key
+	Peers          []string // empty = no peers (Peers: [])
+	AllowedSources []string // empty = placeholder example entry
 }
 
 // Generate returns a freshly generated, single merged ydn64.conf HJSON
@@ -82,12 +81,7 @@ func Generate(overrides GenerateOverrides) (string, error) {
 	nodeIP, pool6CIDR, pool6Prefix := DeriveFromPrivateKey(privKey)
 	privKeyHex := hex.EncodeToString(privKey)
 
-	ignored := overrides.IgnoredDstSubnets
-	if len(ignored) == 0 {
-		ignored = DefaultIgnoredDstSubnets
-	}
-
-	return buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix, overrides.Peers, overrides.AllowedSources, ignored), nil
+	return buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix, overrides.Peers, overrides.AllowedSources, DefaultIgnoredDstSubnets), nil
 }
 
 // formatPeersHJSON renders the Peers list the same way as the hand-written
@@ -99,7 +93,9 @@ func formatPeersHJSON(peers []string) string {
 	var b strings.Builder
 	b.WriteString("[\n")
 	for _, p := range peers {
-		b.WriteString(fmt.Sprintf("    %s\n", p))
+		// Quoted deliberately: peer URIs can contain '#' (comment in HJSON)
+		// or '{}' (InterfacePeers syntax) which break unquoted parsing.
+		b.WriteString(fmt.Sprintf("    %q\n", p))
 	}
 	b.WriteString("  ]")
 	return b.String()
@@ -210,8 +206,10 @@ func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string, peers, allowed
 	sb.WriteString("  NodeInfo: {}\n\n")
 
 	sb.WriteString("  # Shared allowed source filter for both NAT64 and DNS64 services.\n")
-	sb.WriteString("  # CIDR notation or individual IPv6 addresses.\n")
-	sb.WriteString("  # AllowedSources: [\"200::/7\"]\n")
+	sb.WriteString("  # CIDR notation or individual IPv6 addresses. WARNING: never use a\n")
+	sb.WriteString("  # broad range like 200::/7 here - that turns this node into an open\n")
+	sb.WriteString("  # proxy for the entire public Yggdrasil network. List only your own\n")
+	sb.WriteString("  # clients, e.g.: AllowedSources: [\"201:aaaa:bbbb:cccc:dddd:eeee:ffff:1234/128\"]\n")
 	sb.WriteString(fmt.Sprintf("  AllowedSources: %s\n\n", formatAllowedSourcesHJSON(allowedSources)))
 
 	sb.WriteString("  # List of IPv4 subnets that will be ignored (not NATed or synthesised).\n")

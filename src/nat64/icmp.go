@@ -142,7 +142,11 @@ func (s *Service) interceptICMPPacket(pkt []byte) bool {
 	if sess == nil {
 		return true // consumed (dropped): table full or no identifier available
 	}
-	go s.forwardICMP(sess, dstIPv4, seq, data)
+	s.drainWG.Add(1)
+	go func() {
+		defer s.drainWG.Done()
+		s.forwardICMP(sess, dstIPv4, seq, data)
+	}()
 	return true
 }
 

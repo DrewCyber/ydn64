@@ -124,7 +124,9 @@ func (s *Service) handleTCP(req *tcp.ForwarderRequest, logger *log.Logger) {
 
 	yggConn := gonet.NewTCPConn(&wq, ep)
 
+	s.drainWG.Add(1)
 	go func() {
+		defer s.drainWG.Done()
 		defer s.releaseTCP()
 		defer yggConn.Close()
 

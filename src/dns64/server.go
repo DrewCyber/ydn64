@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -69,6 +71,10 @@ type Service struct {
 	listenAddr  string
 	allowedNets atomic.Pointer[[]*net.IPNet]
 	ns          *netstack.YggdrasilNetstack
+	// lastDenyReply rate-limits REFUSED answers to denied sources.
+	lastDenyReply atomic.Int64
+	// wg tracks in-flight query work for graceful drain (see Drain).
+	wg sync.WaitGroup
 	// querySem bounds concurrent in-flight queries (UDP query goroutines +
 	// DNS-over-TCP connections). When full, new work is shed immediately —
 	// UDP queries get SERVFAIL, TCP connections are closed — rather than
@@ -156,6 +162,53 @@ func shedResponse(req *dns.Msg) *dns.Msg {
 	return resp
 }
 
+// refusedResponse builds the REFUSED answer sent (rate-limited) to sources
+// excluded by AllowedSources, so misconfigured clients fail over to another
+// resolver immediately instead of waiting out their timeout.
+func refusedResponse(req *dns.Msg) *dns.Msg {
+	resp := new(dns.Msg)
+	resp.Id = req.Id
+	resp.Question = req.Question
+	resp.Response = true
+	resp.Rcode = dns.RcodeRefused
+	return resp
+}
+
+// denyReplyInterval is the minimum spacing between REFUSED answers to denied
+// sources; further denied traffic within the window is dropped silently so
+// denials cannot be amplified into an unbounded reply stream.
+const denyReplyInterval = 500 * time.Millisecond
+
+// udpReplyWriter is the slice of *gonet.UDPConn the denial path needs;
+// an interface so tests can record replies without a live stack.
+type udpReplyWriter interface {
+	WriteTo(b []byte, from net.Addr) (int, error)
+}
+
+// maybeRefuseDenied answers one denied UDP query with REFUSED unless a
+// refusal went out too recently. Denied TCP connections are simply closed:
+// no framed query exists yet to echo identifiers from.
+func (s *Service) maybeRefuseDenied(conn udpReplyWriter, from net.Addr, data []byte) {
+	now := time.Now().UnixNano()
+	last := s.lastDenyReply.Load()
+	if last != 0 && now-last < int64(denyReplyInterval) {
+		return
+	}
+	if !s.lastDenyReply.CompareAndSwap(last, now) {
+		return
+	}
+	req := new(dns.Msg)
+	if err := req.Unpack(data); err != nil {
+		return // cannot echo id/question — drop silently
+	}
+	if out, err := refusedResponse(req).Pack(); err == nil {
+		if _, err := conn.WriteTo(out, from); err != nil {
+			// Best effort by design; the next denial retries after the window.
+			_ = err
+		}
+	}
+}
+
 // isAllowed reports whether srcIP is in one of the configured allowed-source ranges.
 func (s *Service) isAllowed(ip net.IP) bool {
 	for _, n := range *s.allowedNets.Load() {
@@ -181,11 +234,9 @@ func (s *Service) Start(ctx context.Context, logger *log.Logger) error {
 	if ip == nil {
 		return fmt.Errorf("dns64 listen addr: invalid IP %q", host)
 	}
-	port := 53
-	if portStr != "" {
-		if _, err := fmt.Sscan(portStr, &port); err != nil {
-			return fmt.Errorf("dns64 listen port %q: %w", portStr, err)
-		}
+	port, err := parseListenPort(portStr)
+	if err != nil {
+		return fmt.Errorf("dns64 listen addr %q: %w", s.listenAddr, err)
 	}
 
 	// Register the listen IP as a local address on NIC1 so gVisor will
@@ -229,6 +280,20 @@ func (s *Service) Start(ctx context.Context, logger *log.Logger) error {
 	return nil
 }
 
+// parseListenPort parses the port part of Dns64Listen ("" → 53). Unlike
+// fmt.Sscan, strconv rejects signs, whitespace and out-of-range values
+// instead of silently truncating them into a different port.
+func parseListenPort(s string) (int, error) {
+	if s == "" {
+		return 53, nil
+	}
+	p, err := strconv.ParseUint(s, 10, 16)
+	if err != nil || p == 0 {
+		return 0, fmt.Errorf("invalid port %q (want 1-65535)", s)
+	}
+	return int(p), nil
+}
+
 // gonetListenUDP opens a UDP socket on the gVisor stack bound to addr.
 func gonetListenUDP(st *stack.Stack, addr *net.UDPAddr) (*gonet.UDPConn, error) {
 	fa := tcpip.FullAddress{
@@ -267,13 +332,16 @@ func (s *Service) serveUDP(conn *gonet.UDPConn, logger *log.Logger) {
 		}
 		if srcIP == nil || !s.isAllowed(srcIP) {
 			logger.Debugf("DNS64: denied query from %s (not in AllowedSources)", addr)
+			s.maybeRefuseDenied(conn, addr, buf[:n])
 			continue
 		}
 		logger.Debugf("DNS64: query from %s (%d bytes)", addr, n)
 
 		pkt := make([]byte, n)
 		copy(pkt, buf[:n])
+		s.wg.Add(1)
 		go func(data []byte, from net.Addr) {
+			defer s.wg.Done()
 			req := new(dns.Msg)
 			if err := req.Unpack(data); err != nil {
 				logger.Debugf("DNS64: unpack error from %s: %v", from, err)
@@ -349,7 +417,9 @@ func (s *Service) serveTCP(listener *gonet.TCPListener, logger *log.Logger) {
 			continue
 		}
 
+		s.wg.Add(1)
 		go func() {
+			defer s.wg.Done()
 			defer s.releaseQuery()
 			s.serveTCPConn(conn, logger)
 		}()
@@ -363,7 +433,7 @@ func (s *Service) serveTCPConn(conn net.Conn, logger *log.Logger) {
 	defer conn.Close()
 	dc := &dns.Conn{Conn: conn}
 	for {
-		conn.SetReadDeadline(time.Now().Add(dnsTCPIdleTimeout))
+		_ = conn.SetReadDeadline(time.Now().Add(dnsTCPIdleTimeout))
 		req, err := dc.ReadMsg()
 		if err != nil {
 			return
@@ -371,9 +441,25 @@ func (s *Service) serveTCPConn(conn net.Conn, logger *log.Logger) {
 		logger.Debugf("DNS64: TCP query from %s", conn.RemoteAddr())
 
 		resp := s.proxy.handle(req)
+		_ = conn.SetWriteDeadline(time.Now().Add(dnsTCPIdleTimeout))
 		if err := dc.WriteMsg(resp); err != nil {
 			logger.Debugf("DNS64: TCP write error to %s: %v", conn.RemoteAddr(), err)
 			return
 		}
+	}
+}
+
+// Drain waits for all in-flight query work (UDP query goroutines and
+// DNS-over-TCP connection handlers) to finish, or until d elapses — used
+// during shutdown so cancellation doesn't cut answers mid-flight.
+func (s *Service) Drain(d time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
 	}
 }

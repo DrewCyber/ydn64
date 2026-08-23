@@ -95,6 +95,14 @@ the generated `PrivateKey` (and the `Nat64Pool`/`Dns64Listen` addresses
 derived from it) stay stable across container restarts — without it, every
 restart gets a brand new Yggdrasil identity.
 
+The container runs as the dedicated non-root user `ydn64` (UID 10001): ydn64
+needs no privileges — everything runs in userspace, and DNS is bound through
+the embedded netstack rather than a privileged OS socket. Mounted volumes
+must therefore be writable by UID 10001 (e.g. `chown -R 10001:10001 ./data`
+on the host, or a named volume); if your setup cannot do that, pass
+`--user 0:0` to keep running as root. `--cap-add=NET_RAW` continues to work
+for non-root container users and enables ICMP NAT64.
+
 The two fields you normally must set — `Peers` and `AllowedSources` — can be
 supplied as environment variables instead of editing the mounted config file,
 as a comma and/or whitespace separated list. `ydn64` applies them as
@@ -105,12 +113,18 @@ docker run -d \
   --name ydn64 \
   -v ydn64-data:/data \
   -e YDN64_PEERS="tls://a.b.c.d:e, tls://f.g.h.i:j" \
-  -e YDN64_ALLOWED_SOURCES="200::/7" \
+  -e YDN64_ALLOWED_SOURCES="201:aaaa:bbbb:cccc:dddd:eeee:ffff:1234/128" \
   --cap-add=NET_RAW \
   ghcr.io/drewcyber/ydn64:latest
 ```
 
 `--cap-add=NET_RAW` is optional but recommended — see below.
+
+> **WARNING:** never set `AllowedSources` (or `YDN64_ALLOWED_SOURCES`) to a
+> broad range like `200::/7`. That permits *every* public Yggdrasil node to
+> use this node as its IPv4 proxy, effectively making it an open relay. List
+> only your own clients' addresses or subnets (a `/128` per client, or the
+> /64 subnet they live in).
 
 ### Running with no config file/volume at all
 
@@ -133,7 +147,7 @@ docker run -d \
   --name ydn64 \
   -e YDN64_PRIVATE_KEY="<64-byte hex private key>" \
   -e YDN64_PEERS="tls://a.b.c.d:e, tls://f.g.h.i:j" \
-  -e YDN64_ALLOWED_SOURCES="200::/7" \
+  -e YDN64_ALLOWED_SOURCES="201:aaaa:bbbb:cccc:dddd:eeee:ffff:1234/128" \
   --cap-add=NET_RAW \
   ghcr.io/drewcyber/ydn64:latest
 ```

@@ -26,7 +26,10 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 RUN env -u GOOS -u GOARCH go run ./tools/licenses -o /out/THIRD-PARTY-NOTICES.txt
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates \
+    && addgroup -g 10001 ydn64 \
+    && adduser -D -H -u 10001 -G ydn64 ydn64 \
+    && mkdir -p /data && chown ydn64:ydn64 /data
 COPY --from=build /out/ydn64 /usr/local/bin/ydn64
 COPY --from=build /out/THIRD-PARTY-NOTICES.txt /usr/local/share/doc/ydn64/THIRD-PARTY-NOTICES.txt
 COPY --from=build LICENSE /usr/local/share/doc/ydn64/LICENSE
@@ -37,7 +40,13 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 # addresses across restarts by mounting a volume at /data — otherwise the
 # entrypoint generates a brand new config (and Yggdrasil identity) every
 # container start. See README.md "Running with Docker" for details.
+#
+# Runs as a dedicated non-root user: everything ydn64 does is userspace
+# (gVisor netstack binds port 53 without privileges); CAP_NET_RAW for ICMP
+# NAT64 can be granted to this user via `--cap-add=NET_RAW`. Mounted volumes
+# must be writable by UID 10001, or pass `--user=0` and accept a root process.
 VOLUME ["/data"]
 ENV YDN64_CONFIG=/data/ydn64.conf
+USER 10001:10001
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

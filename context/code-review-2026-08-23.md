@@ -198,11 +198,11 @@ The RFC 6052 variable-length alternative remains tracked in RFCs.txt.
 
 #### R12 · ~~Control-packet drops are invisible when `ctrlPackets` fills~~ — FIXED 2026-08-23 (see §1)
 
-#### R13 · Silent error swallowing patterns
-Bare `recover()` hides panics and reports success (log value+stack, return
-`&tcpip.ErrAborted{}`); ignored deadline errors; discarded `dns.NewRR` errors
-in synthesis/PTR paths; logger fallback drops the cause; `parseIA` error text
-says `invalid_address` but the config key is `Dns64InvalidAddress`.
+#### R13 · ~~Silent error swallowing patterns~~ — FIXED 2026-08-23 (see §1)
+All five closed 2026-08-23: writePacket's recover logs value+stack and
+returns ErrAborted; deadline errors marked `_ =`; dns.NewRR error sites no
+longer append nil records; main.go's logger fallback includes the cause;
+parseIA names the Dns64InvalidAddress key.
 
 #### R14 · Dangerous allowlist examples in user-facing docs
 README Docker examples and the generated-config comment show
@@ -210,46 +210,47 @@ README Docker examples and the generated-config comment show
 open relay). Replace with a concrete /128 example plus one explicit warning
 sentence.
 
-#### R15 · Container/packaging hardening
-Image runs as root (binary needs nothing beyond optional CAP_NET_RAW) — add a
-non-root USER; entrypoint writes the config non-atomically and world-readable
-(generate to `.tmp`, `chmod 600`, `mv`); consider HEALTHCHECK.
+#### R15 · ~~Container/packaging hardening~~ — FIXED 2026-08-23 (see §1); HEALTHCHECK deliberately skipped: ydn64 exposes no health endpoint, and since R11 a dead netstack cancels the process, so Docker/podman restart policy covers liveness.
 
 #### R16 · ~~Remaining inbound-validation gap: the ICMP interceptor path~~ — FIXED 2026-08-23 (see §1)
 
-#### R17 · Small robustness batch
-- `dispatcher` field written/read without synchronisation (Attach/Close vs
-  read loop) — atomic pointer; ~~Close-vs-read-loop nil deref risk~~
-  (nil-deref half closed 2026-08-23: readLoop now nil-checks before
-  delivery; full synchronisation of Attach/Close still open).
-- Graceful shutdown: services have no Stop()/drain; in-flight work is killed
-  at ctx cancellation. Add WaitGroup-based drain with bounded deadline.
-- `cleanupSessions` ticker cadence frozen at startup (cosmetic; per-session
-  deadlines do the real work).
-- `fmt.Sscan` port parsing accepts signs/out-of-range then truncates — use
-  `strconv.ParseUint(_, 10, 16)`.
-- `serveTCPConn` sets read but no write deadline.
-- `proxyTCP` closes both directions on one-sided EOF — use `CloseWrite()` for
-  half-close protocols; make the (keepalive-backed) idle window configurable
-  alongside `Nat64UdpTimeout`.
-- `reloadConfig` applies NAT64 then DNS64 sequentially (brief mixed-policy
-  window; validate-then-swap atomically).
-- `GenerateOverrides.IgnoredDstSubnets` is dead (no env wiring/caller) — wire
-  or delete. `dnsCache.purgeInterval` written unlocked by Reload — guard/delete.
+#### R17 · Small robustness batch — MOSTLY FIXED 2026-08-23 (see §1)
+- [FIXED] Graceful shutdown: nat64/dns64 gained WaitGroup-based `Drain(d)`;
+  main.go drains both services for up to 5 s between ctx cancellation and
+  core stop.
+- [FIXED] `fmt.Sscan` port parsing → `strconv.ParseUint(10, 16)` via
+  `parseListenPort` (+ table test).
+- [FIXED] `serveTCPConn` now sets a write deadline too (and both deadline
+  errors are explicitly ignored by intent).
+- [FIXED] `proxyTCP` half-closes (`CloseWrite`) on one-sided EOF instead of
+  killing both directions.
+- [FIXED] `reloadConfig` applies DNS64 before NAT64 so a rejected new config
+  aborts before any mutation (a brief mixed-policy window between the two
+  swaps remains — cross-service atomicity not worth the plumbing).
+- [FIXED] Dead `GenerateOverrides.IgnoredDstSubnets` field removed;
+  unlocked `dnsCache.purgeInterval` field removed entirely (janitor reads
+  only its ticker).
+- [DEFERRED] Full Attach/Close synchronisation of `dispatcher`
+  (the nil-deref half was closed with R11's dispatcher check).
+- [DEFERRED] Configurable keepalive idle window (keepalives already reap
+  dead peers in ~165 s).
+- [WONTFIX] `cleanupSessions` ticker cadence frozen at startup — cosmetic;
+  per-session deadlines do the real work.
 
-#### R18 · Docs/polish batch
-- `matchZone` doc claims most-specific-first; implementation is config-order
-  (only catch-all demoted). Sort by label count or fix comment + test.
-- Denied DNS64 queries are silently dropped; a rate-limited REFUSED would help
-  clients fall back faster (defensible either way).
-- Hot-path niceties when profiling justifies: lowercase-once invariant in DNS
-  path, `netip.Prefix` for `isAllowed`/`pool6Net`, minimal upstream messages
-  instead of `req.CopyTo` deep copies, `sync.Pool` for per-reply buffers.
-- Plumb `context.Context` into dials/upstream lookups so shutdown doesn't wait
-  out 5–10 s timeouts.
-- Consider extending `DefaultIgnoredDstSubnets` with `192.0.0.0/24`,
+#### R18 · Docs/polish batch — MOSTLY FIXED 2026-08-23 (see §1)
+- [FIXED] `matchZone` doc now states CONFIG-ORDER precedence (catch-all
+  demoted), pinned by TestMatchZonePrecedence /
+  TestMatchZoneOrderBeatsSpecificity.
+- [FIXED] Denied DNS64 queries get a rate-limited REFUSED (500 ms global
+  window) so misconfigured clients fail over fast; harness case 05 unchanged.
+- [FIXED] `DefaultIgnoredDstSubnets` extended with `192.0.0.0/24`,
   `198.18.0.0/15`, `192.88.99.0/24`.
-- Quote peer URIs defensively in `-genconf` output (`#`/`{}` break HJSON).
+- [FIXED] Peer URIs are quoted in `-genconf` output (`#` starts an HJSON
+  comment; `{}` breaks object parsing).
+- [DEFERRED] Hot-path niceties (lowercase-once, netip.Prefix allowlists,
+  minimal upstream messages, per-reply buffer pool) — profiling-gated.
+- [DEFERRED] `context.Context` plumbing into upstream dials so shutdown
+  doesn't wait out timeouts (mitigated by the bounded Drain).
 
 ---
 
@@ -264,4 +265,4 @@ non-root USER; entrypoint writes the config non-atomically and world-readable
 | 5 | ~~R9 (/96 + forwarder validation + empty-allowlist warning)~~ (done 2026-08-23) | silent misconfigs become startup errors | small |
 | 6 | ~~R10 (EDNS normalisation + real-function test)~~ (done 2026-08-23) | interop correctness | small |
 | 7 | ~~R5 (ICMP ID rewrite), R16 (ICMP-path validation), R11/R12~~ (all done 2026-08-23) | robustness | medium |
-| 8 | R13–R15, R17, R18 | hygiene sweep | medium |
+| 8 | ~~R13–R15, R17, R18~~ (done 2026-08-23; a few explicitly deferred sub-items remain, marked in §2) | hygiene sweep | medium |

@@ -72,6 +72,24 @@ type Service struct {
 	// on-demand dumps (SIGHUP) so their lines partition time cleanly.
 	statsMu      sync.Mutex
 	lastStatSnap statSnapshot
+
+	// drainWG tracks spawned per-flow goroutines (TCP proxies, UDP session
+	// relay pairs, ICMP forwards) so shutdown can wait briefly for them.
+	drainWG sync.WaitGroup
+}
+
+// Drain waits until all in-flight per-flow goroutines finish (session
+// cleanup closes their connections on ctx cancellation) or until d elapses.
+func (s *Service) Drain(d time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		s.drainWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
+	}
 }
 
 // nat64Settings holds the subset of NAT64 configuration that can be changed

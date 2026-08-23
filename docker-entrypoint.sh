@@ -23,7 +23,13 @@ CONFIG_PATH="${YDN64_CONFIG:-/data/ydn64.conf}"
 if [ ! -f "$CONFIG_PATH" ]; then
     echo "ydn64: no config found at $CONFIG_PATH, generating one..." >&2
     mkdir -p "$(dirname "$CONFIG_PATH")"
-    ydn64 -genconf > "$CONFIG_PATH"
+    # Atomic + private: generate next to the target, tighten permissions
+    # (the file contains the node's private key), then move into place so a
+    # crash mid-generation never leaves a truncated or world-readable config.
+    TMP_CONF="$(dirname "$CONFIG_PATH")/.ydn64.conf.tmp"
+    ydn64 -genconf > "$TMP_CONF"
+    chmod 600 "$TMP_CONF"
+    mv "$TMP_CONF" "$CONFIG_PATH"
 fi
 
 exec ydn64 -useconffile "$CONFIG_PATH" "$@"
