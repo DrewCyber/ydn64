@@ -1,3 +1,4 @@
+ - [ ] improve / speedup tests
  - [ ] DNS: Pass-through zone (+tests)
  - [ ] End2end DNS config tests
  - [ ] CGO_ENABLED

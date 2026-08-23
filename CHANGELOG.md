@@ -12,6 +12,52 @@ moved under the corresponding version heading.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-23
+
+gVisor netstack hardening (UDP fragmentation, MTU fix, TCP robustness)
+and DNS64 EDNS(0) support.
+
+- **RFC 6891 (EDNS(0))** — DNS64 now negotiates UDP payload sizes over
+  EDNS(0): responses longer than the client's advertised payload size
+  are truncated, with a 1232-byte safe default for clients that send no
+  OPT record and a 4096-byte cap even when the client advertises more;
+  replies carry an OPT record whenever the query did.
+- **RFC 6146 §3.4 — NAT64 UDP moved onto gVisor's UDP forwarder** — the
+  hand-rolled NIC-level UDP interceptor was replaced with gVisor's
+  `udp.NewForwarder`, so the stack now owns UDP checksums, demuxing,
+  IPv6 reassembly and outbound fragmentation. Fragmented datagrams and
+  oversized replies now traverse NAT64 end-to-end. Policy-rejected
+  flows remain silently dropped, while endpoint-creation failures now
+  answer ICMPv6 port-unreachable instead of nothing.
+- **Fixed oversized-packet drops — `IfMTU` is now honoured** — the
+  underlying Yggdrasil `ipv6rwc` layer defaults its internal MTU to
+  1280 and enforces it on inbound frames; because ydn64 has no TUN
+  device, nothing ever called `SetMTU`, so every client frame above
+  1280 bytes was dropped with an ICMPv6 Packet Too Big reply
+  regardless of configuration. The configured `IfMTU` is now applied
+  to the netstack (also driving egress segmentation and buffer sizes);
+  it stays omitted from `-genconf` output, where the upstream default
+  works fine. This supersedes the 0.1.0 claim that the key is inert.
+- **TCP keepalive + user timeout on NAT64 connections** — the gVisor
+  leg of every proxied connection now enables keepalives (idle 75 s +
+  9×10 s probes, ~165 s detection budget) plus a 5-minute user timeout
+  that only bounds stalled transfers with unacknowledged data, so
+  connections into dead Yggdrasil peers are reclaimed promptly instead
+  of lingering until the stack's far longer internal retransmit
+  timeouts expire.
+- **CUBIC congestion control** — the netstack's TCP transport now uses
+  CUBIC (Linux's default since 2008) instead of gVisor's Reno default:
+  parity on lossless paths, better recovery on lossy Yggdrasil tunnels.
+  No configuration knob.
+- **Netstack stats logging** — NAT64 emits one compact, greppable
+  `netstack stats:` line at debug level every 60 s (IP/TCP/UDP/ICMPv6
+  counters, established connections, live NAT sessions); a `SIGHUP`
+  reload now also triggers an immediate stats dump.
+- **New `YDN64_DEBUG_PCAP` packet tap** — setting this environment
+  variable to a file path captures all traffic crossing the netstack
+  to a libpcap file for offline analysis (best-effort: failure to open
+  the capture only logs a warning and never blocks startup).
+
 ## [0.5.0] - 2026-08-14
 
 RFC compliance hardening across NAT64 and DNS64.
