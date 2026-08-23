@@ -796,3 +796,75 @@ moot), and what remains is a wash — atomic hot-reload already works today,
 silent-drop semantics are identical, and adopting iptables would add conntrack
 goroutines plus a rule-encoding layer to maintain for zero behavioral gain.
 No production code changed as part of this spike.
+
+### T7 addendum + gVisor version assessment (2026-08-23, re-check vs latest)
+
+Attempted to upgrade gVisor to `@latest`
+(`v0.0.0-20260822013939-3c5eee17dc45`, also tested
+`release-20260817.0` = `v0.0.0-20260815053812`). **Upgrade is blocked
+upstream**; the pin was reverted and stays at
+`v0.0.0-20250812171554-968e93457fe6`, which turns out to be effectively the
+last Go-module-consumable gVisor:
+
+1. **Missing generated files.** Starting with `release-20250820.0` (one week
+   after our pin), gVisor stopped shipping Bazel-generated code in the module
+   zip / git tree: `view_list.go`, `chunk_refs.go`, `*_state_autogen.go` etc.
+   (~484 such files existed in our pinned tree; ~33 in new ones). These come
+   from TWO build-time codegen systems (`tools/go_generics` template
+   instantiation + `tools/go_stateify`); without them core packages do not
+   compile (`undefined: ViewList / waiterEntry / chunkRefs ...`). Both tools
+   are standalone-runnable — I built the new `stateify` binary successfully —
+   but reproducing the full pipeline over every imported package means
+   maintaining a mini fork build system.
+2. **Invalid test-package name.** `pkg/tcpip/stack/bridge_test.go` declares
+   `package bridge_test` inside the `stack` package directory, which plain Go
+   rejects ("found packages stack and bridge") for any importer. Present in
+   every release since `release-20251020.0`. Known upstream (issues #11511,
+   #11531; fix PRs #10593/#11699 closed unmerged) because gVisor's Bazel CI
+   never scans it.
+
+Paths forward if a newer netstack is ever wanted:
+- **(a) In-repo fork**: vendor the source under `third_party/gvisor`,
+  regenerate missing files (stateify + go_generics), fix bridge_test.go's
+  package name, wire via `replace`. Hermetic but heavy; upgrades repeat the
+  procedure.
+- **(b) Vendor + post-vendor codegen script**: `go mod vendor` strips dep
+  `_test.go` files automatically (fixes #2), then run the codegen tools into
+  `vendor/` (fixes #1). Needs a wrapper script so regeneration is repeatable.
+- **(c) Stay pinned** and watch issues #11531/#11699 until upstream restores
+  module completeness.
+
+**T7 verdict re-checked against the latest tree — materially changed facts,
+unchanged recommendation.** The nftables package is now genuinely integrated:
+`ipv6.go` consults `stack.NFTables()` at input/forward/output/NAT hooks when
+`IsNFTablesConfigured()`, attached via `stack.Options.NFTables` /
+`SetNFTables`, with full mutation APIs (AddTable/DeleteTable/AddChain/
+DeleteChain/Flush). However:
+- the package doc still states "**The package is not yet thread-safe**" with
+  an explicit TODO (b/345684870): "Must be done before the package is used in
+  production" — disqualifying for ydn64's SIGHUP concurrent reload;
+- rules are managed through netlink-message attribute encoding (`nlmsg`)
+  rather than a plain Go API — high integration cost;
+- the ICMP interceptor still bypasses gVisor delivery entirely, so manual
+  `isAllowed` must survive regardless.
+Re-revisit when upstream lands thread-safety; iptables
+(`ForceReplaceTable`) remains available as before but adds conntrack
+machinery for no coverage win.
+
+**Sync audit of T1–T6 against the latest tree (`release-20260817.0` /
+master)** — all APIs we depend on are UNCHANGED; nothing needs syncing:
+- T1: `udp.ForwarderRequest` still has only ID()/CreateEndpoint(); demuxer
+  still matches registered endpoints before the transport handler.
+- T2: keepalive options unchanged; enablement still
+  `SocketOptions().GetKeepAlive()` consumed by `keepaliveTimerExpired`.
+- T3: ipv6rwc MTU semantics live in **yggdrasil-go**, not gVisor — unaffected
+  by any gVisor bump (relevant only on yggdrasil-go upgrades).
+- T4: `tcpip.Stats.ICMP.V6` layout intact.
+- T5: `PacketEndpoint` still one-method; `DeliverLinkPackets` still a
+  NICOptions field; ETH_P_ALL outbound-only-to-any-endpoint semantics
+  preserved (`nic.go`: "On Linux, only ETH_P_ALL endpoints get outbound
+  packets").
+- T6: `NewProtocol` still defaults to Reno, `NewProtocolCUBIC` still exists;
+  `MTUProbingOption` still does not exist anywhere (0 matches).
+- gonet.NewUDPConn two-arg signature and header.EthernetProtocolAll constant
+  unchanged.
