@@ -13,7 +13,7 @@ All API names cited below were verified against the exact vendored version.
 | ID  | Title                                                        | Priority | Depends on | Status |
 |-----|--------------------------------------------------------------|----------|------------|--------|
 | T1  | Migrate NAT64 UDP to gVisor `udp.NewForwarder`               | P0       | —          | DONE   |
-| T2  | TCP keepalive / user-timeout on NAT64 proxied connections    | P1       | —          |        |
+| T2  | TCP keepalive / user-timeout on NAT64 proxied connections    | P1       | —          | DONE   |
 | T3  | Integration verification + fragmented-UDP test case          | P1       | T1         |        |
 | T4  | Stack & per-flow stats exposure                              | P2       | —          |        |
 | T5  | Packet tap (multi-listener) via `RegisterPacketEndpoint`     | P2       | —          |        |
@@ -524,3 +524,46 @@ clean; podman harness `./run.sh all`: all cases passed (first run hit the
 documented case-04/05 restart flake twice — second full run green).
 Docs updated: AGENTS.md interceptor + demux-order gotchas, README fragmented-
 packet claim, RFCs.txt (6146 §3.4 → PARTIAL, 8200 §8.1/§4 notes).
+
+### T2 — DONE (2026-08-23)
+
+Implementation notes that differ from / refine the task text:
+
+- **API correction**: this vendored gVisor has neither
+  `tcpip.KeepaliveEnabledOption` nor `Endpoint.SetSockOptBool`. Keepalive is
+  enabled via `ep.SocketOptions().SetKeepAlive(true)` (the SO_KEEPALIVE flag
+  consumed by `tcp.keepaliveTimerExpired` in `transport/tcp/connect.go`);
+  idle/interval/count/user-timeout are set exactly as the task listed. The
+  task's claim that all names were verified against this version was wrong on
+  that one option.
+- Defaults chosen: idle 75s + count 9 × interval 10s ≈ 165s dead-peer budget;
+  `TCPUserTimeout` = 5 min (≥ keepalive budget) so it only ever bounds
+  *stalled transfers* (data outstanding, nothing ACKed), never idle probing.
+  Hard-coded constants in `src/nat64/tcp.go`; no config-schema change
+  (permitted by step 4). Failures are non-fatal (debug log + proxy anyway).
+- Options are applied after `CreateEndpoint` and are safe there: the
+  endpoint's keepalive timer is initialized at construction, so the
+  `resetKeepaliveTimer` panic path is unreachable.
+
+Tests added (`src/nat64/tcp_test.go`):
+
+- `TestApplyTCPKeepalive` — applies the helper to a real gVisor TCP endpoint
+  and reads every knob back (`GetSockOpt`/`GetSockOptInt`/
+  `SocketOptions().GetKeepAlive()`), plus an assertion that the user timeout
+  can never fire before the keepalive detection budget.
+
+Verification:
+
+- Build/vet clean; `go test -race ./...` clean; podman harness full run: all
+  cases passed first try.
+- Behavioral spot-check (pause B mid-flow): **inconclusive by topology, not
+  by regression.** A held-open NAT64 TCP connection B→dns.google(:443, then
+  :53) was torn down ~15 s after `podman pause b`, but a control experiment
+  showed the same teardown with B fully alive: Google's endpoints FIN idle
+  connections that send no data within seconds-to-tens-of-seconds, which
+  propagates through `proxyTCP`'s half-close handling (B lands in
+  CLOSE_WAIT; A's v4 leg closes last → TIME_WAIT). Public targets cannot
+  isolate a ~165 s keepalive window in this harness. Deterministic timing
+  would need an IPv4 listener container (topology change — out of scope
+  here); the knobs themselves are unit-verified against real gVisor options,
+  and normal traffic is unaffected per the full-suite pass.

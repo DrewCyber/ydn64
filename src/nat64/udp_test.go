@@ -136,12 +136,12 @@ func (*chanLinkEndpoint) SetLinkAddress(tcpip.LinkAddress)   {}
 func (*chanLinkEndpoint) Capabilities() stack.LinkEndpointCapabilities {
 	return stack.CapabilityNone
 }
-func (*chanLinkEndpoint) Wait()                                {}
+func (*chanLinkEndpoint) Wait()                                   {}
 func (*chanLinkEndpoint) ARPHardwareType() header.ARPHardwareType { return header.ARPHardwareNone }
-func (*chanLinkEndpoint) AddHeader(*stack.PacketBuffer)        {}
-func (*chanLinkEndpoint) ParseHeader(*stack.PacketBuffer) bool { return true }
-func (*chanLinkEndpoint) Close()                               {}
-func (*chanLinkEndpoint) SetOnCloseAction(func())              {}
+func (*chanLinkEndpoint) AddHeader(*stack.PacketBuffer)           {}
+func (*chanLinkEndpoint) ParseHeader(*stack.PacketBuffer) bool    { return true }
+func (*chanLinkEndpoint) Close()                                  {}
+func (*chanLinkEndpoint) SetOnCloseAction(func())                 {}
 
 func (e *chanLinkEndpoint) WritePackets(list stack.PacketBufferList) (int, tcpip.Error) {
 	n := 0

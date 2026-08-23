@@ -35,7 +35,7 @@ func TestNAT64InboundSourceAndDstCheck(t *testing.T) {
 		// Test Case 1: Destination not in pool6
 		pkt := make([]byte, 100)
 		pkt[0] = 0x60
-		pkt[6] = 58  // Next header = ICMPv6
+		pkt[6] = 58   // Next header = ICMPv6
 		pkt[40] = 128 // Type = Echo Request
 		copy(pkt[8:24], allowedSrcIP)
 		copy(pkt[24:40], outsideDstIP)
@@ -46,7 +46,7 @@ func TestNAT64InboundSourceAndDstCheck(t *testing.T) {
 		// Test Case 2: Destination in pool6, source is in pool6 (spoofed)
 		pkt = make([]byte, 100)
 		pkt[0] = 0x60
-		pkt[6] = 58  // Next header = ICMPv6
+		pkt[6] = 58   // Next header = ICMPv6
 		pkt[40] = 128 // Type = Echo Request
 		copy(pkt[8:24], spoofedSrcIP)
 		copy(pkt[24:40], pool6PublicDstIP)
@@ -57,7 +57,7 @@ func TestNAT64InboundSourceAndDstCheck(t *testing.T) {
 		// Test Case 3: Destination in pool6, source allowed, but private IPv4 destination
 		pkt = make([]byte, 100)
 		pkt[0] = 0x60
-		pkt[6] = 58  // Next header = ICMPv6
+		pkt[6] = 58   // Next header = ICMPv6
 		pkt[40] = 128 // Type = Echo Request
 		copy(pkt[8:24], allowedSrcIP)
 		copy(pkt[24:40], pool6PrivateDstIP)

@@ -7,10 +7,62 @@ import (
 	"time"
 
 	"github.com/gologme/log"
+	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
+
+// NAT64 TCP keepalive tuning for the gVisor (Yggdrasil-facing) leg of proxied
+// connections. Without keepalives, a peer that vanishes silently (crash,
+// partition, radio loss) mid-idle leaves the endpoint lingering until gVisor's
+// very long internal retransmit timeouts give up; with them, a dead peer is
+// detected in roughly:
+//
+//	tcpKeepaliveIdle + tcpKeepaliveCount × tcpKeepaliveInterval
+//	= 75s            + 9 × 10s                        ≈ 165s
+//
+// which is aggressive enough to reap dead Yggdrasil peers without risking
+// false positives on the high-latency paths Yggdrasil routinely traverses.
+//
+// tcpKeepaliveUserTimeout additionally bounds retransmission stalls on
+// *active* transfers (data outstanding but unacknowledged): if nothing is
+// ACKed for that long the connection is aborted. It is deliberately ≥ the
+// keepalive budget so an idle-but-alive connection probed by keepalives can
+// never be aborted by the user timeout — the two knobs cover disjoint failure
+// modes (idle silence vs. stalled data) and the larger value only ever fires
+// after the keepalive machinery has already had ample opportunity.
+const (
+	tcpKeepaliveIdle        = 75 * time.Second
+	tcpKeepaliveInterval    = 10 * time.Second
+	tcpKeepaliveCount       = 9
+	tcpKeepaliveUserTimeout = 5 * time.Minute
+)
+
+// applyTCPKeepalive enables and tunes TCP keepalives plus the user timeout on
+// a freshly created gVisor endpoint (see the constant docs above). Failures
+// are non-fatal: the connection is still proxied, just without dead-peer
+// detection.
+func applyTCPKeepalive(ep tcpip.Endpoint) tcpip.Error {
+	ep.SocketOptions().SetKeepAlive(true)
+
+	idle := tcpip.KeepaliveIdleOption(tcpKeepaliveIdle)
+	if err := ep.SetSockOpt(&idle); err != nil {
+		return err
+	}
+
+	interval := tcpip.KeepaliveIntervalOption(tcpKeepaliveInterval)
+	if err := ep.SetSockOpt(&interval); err != nil {
+		return err
+	}
+
+	if err := ep.SetSockOptInt(tcpip.KeepaliveCountOption, tcpKeepaliveCount); err != nil {
+		return err
+	}
+
+	userTimeout := tcpip.TCPUserTimeoutOption(tcpKeepaliveUserTimeout)
+	return ep.SetSockOpt(&userTimeout)
+}
 
 // handleTCP is called by tcp.NewForwarder for every inbound TCP SYN.
 // It runs synchronously inside gVisor's packet processing path, so
@@ -55,6 +107,10 @@ func (s *Service) handleTCP(req *tcp.ForwarderRequest, logger *log.Logger) {
 		return
 	}
 	req.Complete(false)
+
+	if err := applyTCPKeepalive(ep); err != nil {
+		logger.Debugf("NAT64 TCP keepalive setup for %s: %v", dstAddr, err)
+	}
 
 	yggConn := gonet.NewTCPConn(&wq, ep)
 
