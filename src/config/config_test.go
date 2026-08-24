@@ -193,6 +193,71 @@ func TestValidateForwarderFormat(t *testing.T) {
 	}
 }
 
+func TestAppConfigValidate_TCPTimeout(t *testing.T) {
+	tests := []struct {
+		name           string
+		val            int
+		expectErr      bool
+		expectedErrSub string
+		expectedVal    int
+	}{
+		{
+			name:        "Default timeout when unset",
+			val:         0,
+			expectErr:   false,
+			expectedVal: DefaultNat64TcpTimeout,
+		},
+		{
+			name:        "Default timeout when negative",
+			val:         -5,
+			expectErr:   false,
+			expectedVal: DefaultNat64TcpTimeout,
+		},
+		{
+			name:           "Error below RFC 5382 REQ-5 floor",
+			val:            DefaultNat64TcpTimeout - 1,
+			expectErr:      true,
+			expectedErrSub: "must not be less than 7440 seconds",
+		},
+		{
+			name:        "Valid at exactly the floor",
+			val:         DefaultNat64TcpTimeout,
+			expectErr:   false,
+			expectedVal: DefaultNat64TcpTimeout,
+		},
+		{
+			name:        "Valid above the floor",
+			val:         DefaultNat64TcpTimeout + 3600,
+			expectErr:   false,
+			expectedVal: DefaultNat64TcpTimeout + 3600,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := nat64Base()
+			cfg.Nat64TcpTimeout = tc.val
+			err := cfg.Validate()
+
+			if tc.expectErr {
+				if err == nil {
+					t.Fatalf("expected error, but got nil")
+				}
+				if !strings.Contains(err.Error(), tc.expectedErrSub) {
+					t.Errorf("expected error to contain %q, got: %v", tc.expectedErrSub, err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if cfg.Nat64TcpTimeout != tc.expectedVal {
+					t.Errorf("expected Nat64TcpTimeout to be %d, got %d", tc.expectedVal, cfg.Nat64TcpTimeout)
+				}
+			}
+		})
+	}
+}
+
 // TestGenconfOutputPassesValidation guards against template drift: whatever
 // -genconf prints must always pass AppConfig.Validate as-is.
 func TestGenconfOutputPassesValidation(t *testing.T) {

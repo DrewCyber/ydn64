@@ -52,6 +52,9 @@ type Service struct {
 
 	ns       NetStack
 	sessions sync.Map // sessionKey → *udpSession
+	// tcpConns tracks live proxied TCP connections (*tcpPair keyed by
+	// itself) so the cleanup loop can expire idle ones (RFC 5382 REQ-5).
+	tcpConns sync.Map
 	// udpSessions counts live entries in sessions. It is incremented when an
 	// entry is inserted (first store of a tuple) and decremented only when
 	// that exact entry is removed, so stale/superseded relay loops can never
@@ -115,6 +118,7 @@ type nat64Settings struct {
 	allowedNets    []*net.IPNet
 	ignoredDstNets []*net.IPNet
 	udpTimeout     time.Duration
+	tcpTimeout     time.Duration
 	maxUDPSessions int64 // ≤0 = unlimited
 	// Per-source anti-abuse ceilings (RFC 6146 §5.3); ≤0 = unlimited.
 	maxUDPSessionsPerSrc int64
@@ -144,6 +148,7 @@ func NewService(cfg config.NAT64Config, allowedSources []string, ignoredDstSubne
 		allowedNets:          config.ParseAllowedNets(allowedSources),
 		ignoredDstNets:       config.ParseIPNets(ignoredDstSubnets),
 		udpTimeout:           time.Duration(cfg.UDPTimeout) * time.Second,
+		tcpTimeout:           time.Duration(cfg.TCPTimeout) * time.Second,
 		maxUDPSessions:       int64(cfg.MaxUDPSessions),
 		maxUDPSessionsPerSrc: int64(cfg.MaxUDPSessionsPerSrc),
 		maxTCPClientsPerSrc:  int64(cfg.MaxTCPConnectionsPerSrc),
@@ -152,9 +157,9 @@ func NewService(cfg config.NAT64Config, allowedSources []string, ignoredDstSubne
 }
 
 // Reload atomically replaces AllowedSources, IgnoredDstSubnets, Nat64UdpTimeout,
-// Nat64MaxUDPSessions and the per-source anti-abuse ceilings with new values,
-// e.g. in response to a SIGHUP-triggered config reload. Safe to call
-// concurrently with in-flight traffic; other NAT64 settings (Nat64Pool,
+// Nat64TcpTimeout, Nat64MaxUDPSessions and the per-source anti-abuse ceilings
+// with new values, e.g. in response to a SIGHUP-triggered config reload. Safe
+// to call concurrently with in-flight traffic; other NAT64 settings (Nat64Pool,
 // Nat64Enable, Nat64MaxTCPConnections) are not reloadable and require a
 // process restart to change.
 func (s *Service) Reload(cfg config.NAT64Config, allowedSources []string, ignoredDstSubnets []string) {
@@ -162,6 +167,7 @@ func (s *Service) Reload(cfg config.NAT64Config, allowedSources []string, ignore
 		allowedNets:          config.ParseAllowedNets(allowedSources),
 		ignoredDstNets:       config.ParseIPNets(ignoredDstSubnets),
 		udpTimeout:           time.Duration(cfg.UDPTimeout) * time.Second,
+		tcpTimeout:           time.Duration(cfg.TCPTimeout) * time.Second,
 		maxUDPSessions:       int64(cfg.MaxUDPSessions),
 		maxUDPSessionsPerSrc: int64(cfg.MaxUDPSessionsPerSrc),
 		maxTCPClientsPerSrc:  int64(cfg.MaxTCPConnectionsPerSrc),
@@ -171,6 +177,11 @@ func (s *Service) Reload(cfg config.NAT64Config, allowedSources []string, ignore
 // udpTimeout returns the current NAT64 UDP session idle timeout.
 func (s *Service) udpTimeout() time.Duration {
 	return s.settings.Load().udpTimeout
+}
+
+// tcpTimeout returns the current proxied-TCP idle timeout (RFC 5382 REQ-5).
+func (s *Service) tcpTimeout() time.Duration {
+	return s.settings.Load().tcpTimeout
 }
 
 // perSrcUDPLimit returns the per-client UDP session ceiling (≤0 = unlimited).
@@ -272,8 +283,8 @@ func (s *Service) Start(ctx context.Context, logger *log.Logger) {
 	go s.statsLoop(ctx, logger, statsInterval)
 
 	cur := s.settings.Load()
-	logger.Printf("NAT64 started  pool6=%s  udp_timeout=%s  sources=%v  icmp=%v",
-		s.pool6Net, cur.udpTimeout, cur.allowedNets, s.icmpConn != nil)
+	logger.Printf("NAT64 started  pool6=%s  udp_timeout=%s  tcp_timeout=%s  sources=%v  icmp=%v",
+		s.pool6Net, cur.udpTimeout, cur.tcpTimeout, cur.allowedNets, s.icmpConn != nil)
 }
 
 // interceptPacket dispatches a raw IPv6 packet from the NIC read path to the
@@ -290,11 +301,15 @@ func (s *Service) interceptPacket(pkt []byte) bool {
 	return s.interceptICMPPacket(pkt)
 }
 
-// cleanupSessions periodically expires idle UDP sessions and ICMP echo
-// sessions, and tears down the raw ICMP socket on shutdown.
+// cleanupSessions periodically expires idle UDP sessions and proxied TCP
+// connections (RFC 5382 REQ-5) and ICMP echo sessions, and tears down the
+// raw ICMP socket on shutdown.
 func (s *Service) cleanupSessions(ctx context.Context) {
 	interval := icmpSessionTimeout / 2
 	if t := s.udpTimeout(); t > 0 && t/2 < interval {
+		interval = t / 2
+	}
+	if t := s.tcpTimeout(); t > 0 && t/2 < interval {
 		interval = t / 2
 	}
 	ticker := time.NewTicker(interval)
@@ -310,6 +325,15 @@ func (s *Service) cleanupSessions(ctx context.Context) {
 				if sess.outConn != nil {
 					sess.outConn.Close()
 				}
+				return true
+			})
+			// Same for every tracked proxied TCP connection: closing both
+			// legs unwinds its proxy goroutine promptly instead of leaving
+			// it for Drain's timeout.
+			s.tcpConns.Range(func(_, v any) bool {
+				pair := v.(*tcpPair)
+				pair.a.Close()
+				pair.b.Close()
 				return true
 			})
 			if s.icmpConn != nil {
@@ -333,6 +357,7 @@ func (s *Service) cleanupSessions(ctx context.Context) {
 					return true
 				})
 			}
+			s.reapIdleTCP()
 			icmpCutoff := time.Now().Add(-icmpSessionTimeout).UnixNano()
 			s.icmpQueries.Range(func(k, v any) bool {
 				qk := k.(icmpQueryKey)

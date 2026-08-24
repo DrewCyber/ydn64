@@ -40,6 +40,7 @@ type NAT64Config struct {
 	Enable                  bool
 	Pool6                   string
 	UDPTimeout              int
+	TCPTimeout              int
 	MaxTCPClients           int
 	MaxUDPSessions          int
 	MaxUDPSessionsPerSrc    int
@@ -54,6 +55,12 @@ const (
 	DefaultDns64MaxQueries        = 512
 	DefaultNat64MaxTCPConnections = 1024
 	DefaultNat64MaxUDPSessions    = 4096
+
+	// RFC 5382 (BCP 142) REQ-5: the idle timer of an ESTABLISHED TCP
+	// connection through a NAT must not expire before 2 hours 4 minutes.
+	// ydn64 applies this as its default (and validation floor) for the
+	// proxied-TCP idle timeout, since it does not distinguish TCP states.
+	DefaultNat64TcpTimeout = 7440
 
 	// Anti-abuse ceilings (RFC 5358, RFC 6146 §5.3): generous enough for a
 	// busy legitimate client, tight enough that a single peer cannot dominate
@@ -95,6 +102,7 @@ type AppConfig struct {
 	Nat64Enable               bool         `json:"Nat64Enable"`
 	Nat64Pool                 string       `json:"Nat64Pool"`
 	Nat64UdpTimeout           int          `json:"Nat64UdpTimeout"`
+	Nat64TcpTimeout           int          `json:"Nat64TcpTimeout"`
 	Nat64MaxTCPConnections    int          `json:"Nat64MaxTCPConnections"`
 	Nat64MaxUDPSessions       int          `json:"Nat64MaxUDPSessions"`
 	Nat64MaxUDPSessionsPerSrc int          `json:"Nat64MaxUDPSessionsPerSource"`
@@ -162,6 +170,7 @@ func (c *AppConfig) NAT64() NAT64Config {
 		Enable:                  c.Nat64Enable,
 		Pool6:                   c.Nat64Pool,
 		UDPTimeout:              c.Nat64UdpTimeout,
+		TCPTimeout:              c.Nat64TcpTimeout,
 		MaxTCPClients:           c.Nat64MaxTCPConnections,
 		MaxUDPSessions:          c.Nat64MaxUDPSessions,
 		MaxUDPSessionsPerSrc:    c.Nat64MaxUDPSessionsPerSrc,
@@ -250,6 +259,11 @@ func (c *AppConfig) Validate() error {
 			c.Nat64UdpTimeout = 300
 		} else if c.Nat64UdpTimeout < 120 {
 			return fmt.Errorf("Nat64UdpTimeout must not be less than 120 seconds")
+		}
+		if c.Nat64TcpTimeout <= 0 {
+			c.Nat64TcpTimeout = DefaultNat64TcpTimeout
+		} else if c.Nat64TcpTimeout < DefaultNat64TcpTimeout {
+			return fmt.Errorf("Nat64TcpTimeout must not be less than %d seconds (2h04m, RFC 5382 REQ-5)", DefaultNat64TcpTimeout)
 		}
 		if c.Nat64MaxTCPConnections <= 0 {
 			c.Nat64MaxTCPConnections = DefaultNat64MaxTCPConnections

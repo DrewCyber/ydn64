@@ -67,7 +67,13 @@ translator state or using the resolver as a query engine, while leaving
 generous headroom for busy legitimate clients. Related: NAT64 UDP session
 lifetime is refreshed only by the client's own outbound datagrams — replies
 from the IPv4 side never extend it, so an attacker cannot pin sockets by
-pointing one datagram at a chatty server.
+pointing one datagram at a chatty server. Proxied TCP connections likewise
+cannot pin their slots forever: they are expired after `Nat64TcpTimeout`
+(default 7440 s — the RFC 5382 REQ-5 minimum of 2h04m, which is also the
+validation floor) of complete idleness. Only payload traffic in either
+direction refreshes the timer; keepalives never do. Expired connections have
+both legs closed, freeing the global and per-source slots they held.
+Reloadable via SIGHUP.
 
 An **empty `AllowedSources`** is accepted but denies every client: NAT64 and
 DNS64 log a loud warning at startup and silently drop all traffic. If clients

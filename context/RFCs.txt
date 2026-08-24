@@ -71,6 +71,8 @@ RFC 6146 — Stateful NAT64: Network Address and Protocol Translation from
                      QUIC/WireGuard and is small; TCP EIM means
                      abandoning the gVisor forwarder (Tier 4).
       - §3.5.2       TCP state machine                                  [N/A]
+                     (gVisor owns TCP state; idle proxied connections are
+                     instead expired wholesale per RFC 5382 REQ-5)
       - §3.8         hairpinning                                        [N/A]
 
 RFC 6147 — DNS64: DNS Extensions for NAT from IPv6 Clients to IPv4 Servers
@@ -184,10 +186,14 @@ RFC 4787 (BCP 127) — NAT Behavioral Requirements for Unicast UDP   [PARTIAL]
           i.e. stricter than RECOMMENDED)                       [DEVIATION]
     REQ-9 hairpinning                                                  [N/A]
 
-RFC 5382 (BCP 142) — NAT Behavioral Requirements for TCP           [PARTIAL]
+RFC 5382 (BCP 142) — NAT Behavioral Requirements for TCP                [DONE]
     Source of TCP_EST (2 h), TCP_TRANS (4 min) and TCP_INCOMING_SYN (6 s).
-    REQ-5 idle timeout: ydn64 has none at all, which exceeds the floor
-    but leaks connections.                                            [TODO]
+    REQ-5 idle timeout: configurable Nat64TcpTimeout, default 7440 s (the
+          REQ-5 ESTABLISHED floor; also the Validate() floor since ydn64
+          does not distinguish TCP states). Connections idle past it have
+          both legs torn down, releasing their global/per-source slots;
+          refreshed only by payload traffic in either direction — the
+          keepalive probes each leg already runs never extend it.       [DONE]
     REQ-1/2/3 (EIM, full state machine, inbound SYN) are architectural. [N/A]
 
 RFC 5508 (BCP 148) — NAT Behavioral Requirements for ICMP             [DONE]

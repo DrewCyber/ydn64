@@ -227,6 +227,13 @@ func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string, peers, allowed
 	sb.WriteString("  # Idle timeout in seconds before a UDP NAT64 session is expired.\n")
 	sb.WriteString("  Nat64UdpTimeout: 300\n\n")
 
+	sb.WriteString("  # Idle timeout in seconds before an idle-but-alive proxied TCP\n")
+	sb.WriteString("  # connection is expired and both legs are closed (freeing its\n")
+	sb.WriteString("  # connection slots). Refreshed by payload traffic in either\n")
+	sb.WriteString("  # direction, never by keepalives. Must be >= 7440 (2h04m, the\n")
+	sb.WriteString("  # RFC 5382 REQ-5 minimum). Reloadable via SIGHUP.\n")
+	sb.WriteString(fmt.Sprintf("  Nat64TcpTimeout: %d\n\n", DefaultNat64TcpTimeout))
+
 	sb.WriteString("  # Maximum number of concurrently proxied NAT64 TCP connections.\n")
 	sb.WriteString("  # Excess connections are refused until existing ones close.\n")
 	sb.WriteString("  # Applied at startup; changing this value requires a restart.\n")

@@ -1,9 +1,11 @@
 package nat64
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/gologme/log"
@@ -62,6 +64,94 @@ func applyTCPKeepalive(ep tcpip.Endpoint) tcpip.Error {
 
 	userTimeout := tcpip.TCPUserTimeoutOption(tcpKeepaliveUserTimeout)
 	return ep.SetSockOpt(&userTimeout)
+}
+
+// tcpPair tracks one proxied NAT64 TCP connection (both legs) for idle
+// expiry (RFC 5382 REQ-5). lastSeenNs is refreshed by every successful
+// payload transfer in either direction. Pure ACKs — including the TCP
+// keepalive probes each leg already runs — are consumed inside their own
+// stacks and never reach the proxy goroutines' reads, so they deliberately
+// do not count as activity; only real payload does. This mirrors a classic
+// NAT mapping timer and prevents a chatty server's keepalives from pinning
+// translator slots forever.
+type tcpPair struct {
+	a, b     net.Conn // a = Yggdrasil (gVisor) leg, b = IPv4 leg
+	label    string   // "src → dst" for reap logging
+	lastSeen atomic.Int64
+}
+
+func (p *tcpPair) touch() { p.lastSeen.Store(time.Now().UnixNano()) }
+
+// activityConn wraps one leg of a tcpPair, refreshing the pair's shared
+// last-seen stamp on every successful Read/Write.
+type activityConn struct {
+	net.Conn
+	pair *tcpPair
+}
+
+func (c *activityConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if n > 0 {
+		c.pair.touch()
+	}
+	return n, err
+}
+
+func (c *activityConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	if n > 0 {
+		c.pair.touch()
+	}
+	return n, err
+}
+
+// trackTCP registers a freshly dialled proxied connection for idle expiry
+// and returns its pair handle.
+func (s *Service) trackTCP(a, b net.Conn, label string) *tcpPair {
+	pair := &tcpPair{a: a, b: b, label: label}
+	pair.touch()
+	s.tcpConns.Store(pair, pair)
+	return pair
+}
+
+// untrackTCP deregisters a proxied connection whose proxy goroutine has
+// finished (both legs are closed by its defers).
+func (s *Service) untrackTCP(pair *tcpPair) { s.tcpConns.Delete(pair) }
+
+// trackedTCPCount reports how many proxied TCP connections are currently
+// tracked for idle expiry.
+func (s *Service) trackedTCPCount() int {
+	n := 0
+	s.tcpConns.Range(func(_, _ any) bool {
+		n++
+		return true
+	})
+	return n
+}
+
+// reapIdleTCP closes both legs of every tracked connection that has been
+// idle past the configured Nat64TcpTimeout (RFC 5382 REQ-5). Closing the
+// legs makes the connection's io.Copy loops return promptly; its deferred
+// cleanup then unregisters the pair and releases the global/per-source
+// slots it was holding.
+func (s *Service) reapIdleTCP() {
+	t := s.tcpTimeout()
+	if t <= 0 {
+		return
+	}
+	cutoff := time.Now().Add(-t).UnixNano()
+	lg := s.serviceLogger()
+	s.tcpConns.Range(func(k, v any) bool {
+		pair := k.(*tcpPair)
+		if pair.lastSeen.Load() < cutoff {
+			if lg != nil {
+				lg.Debugf("NAT64 TCP reaping idle %s", pair.label)
+			}
+			pair.a.Close()
+			pair.b.Close()
+		}
+		return true
+	})
 }
 
 // handleTCP is called by tcp.NewForwarder for every inbound TCP SYN.
@@ -149,8 +239,11 @@ func (s *Service) handleTCP(req *tcp.ForwarderRequest, logger *log.Logger) {
 		}
 		defer conn4.Close()
 
+		pair := s.trackTCP(yggConn, conn4, fmt.Sprintf("%s → %s", srcIP, dstAddr))
+		defer s.untrackTCP(pair)
+
 		logger.Debugf("NAT64 TCP %s → %s", srcIP, dstAddr)
-		proxyTCP(yggConn, conn4)
+		proxyTCP(&activityConn{Conn: yggConn, pair: pair}, &activityConn{Conn: conn4, pair: pair})
 	}()
 }
 
