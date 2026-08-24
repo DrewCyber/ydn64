@@ -5,7 +5,8 @@ Authoritative list of the RFCs that ydn64's NAT64 and DNS64 implementations
 are measured against, with current implementation status.
 
 Last reviewed: 2026-08-24 (RFC 7766 §6.2.1.1/§7 concurrent processing of
-pipelined DNS-over-TCP queries landed in one session)
+pipelined DNS-over-TCP queries and RFC 4787 REQ-8 endpoint-independent
+filtering landed in one session)
 Documented deviations: README.md, "Standards conformance and deliberate deviations"
 
 DESIGN GOAL: ydn64 aims to work well for Yggdrasil clients, NOT to be a
@@ -170,7 +171,7 @@ B. NAT BEHAVIOURAL REQUIREMENTS — NORMATIVELY REFERENCED BY RFC 6146
 These BCPs are where RFC 6146's mapping, filtering and timer MUSTs
 actually live. They were absent from the earlier version of this list.
 
-RFC 4787 (BCP 127) — NAT Behavioral Requirements for Unicast UDP   [PARTIAL]
+RFC 4787 (BCP 127) — NAT Behavioral Requirements for Unicast UDP      [DONE]
     REQ-1 Endpoint-Independent Mapping (UDP): one BIB entry with one
           shared outbound socket per client (addr, port); same external
           ip:port toward every destination                              [DONE]
@@ -183,10 +184,14 @@ RFC 4787 (BCP 127) — NAT Behavioral Requirements for Unicast UDP   [PARTIAL]
     REQ-6 configurable timers                                         [DONE]
     REQ-8 filtering behaviour, configurable via Nat64UdpFiltering:
           "address-dependent" default (= RFC 6146 §5.2's mandated NAT64
-          default), "address-and-port-dependent" optional. True
-          endpoint-independent filtering (delivering datagrams from
-          never-contacted senders) is not implemented — it would need
-          raw injection onto the client leg                      [PARTIAL]
+          default), "address-and-port-dependent" optional, and
+          "endpoint-independent": datagrams from ANY external sender are
+          delivered to a mapped client even without a matching flow —
+          synthesised as IPv6/UDP (source pool6::sender) and injected onto
+          the Yggdrasil leg via the same raw-packet path as the ICMP
+          translation (fragmented when oversized). Pure forwarding: no
+          session is created and no timer refreshed. Completes STUN/ICE
+          hole punching together with REQ-1.                       [DONE]
     REQ-9 hairpinning                                                  [N/A]
 
 RFC 5382 (BCP 142) — NAT Behavioral Requirements for TCP                [DONE]

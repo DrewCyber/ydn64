@@ -76,20 +76,38 @@ const (
 	// port — the strictest behaviour, equivalent to the pre-EIM
 	// connected-socket semantics.
 	filterAddressAndPortDependent
+	// filterEndpointIndependent delivers datagrams from ANY IPv4 sender to a
+	// client that has a mapping (BIB entry), even senders it never contacted
+	// — RFC 4787 REQ-8's endpoint-independent filtering. Together with REQ-1
+	// endpoint-independent mapping this makes the translator transparent to
+	// hole-punching protocols (STUN/ICE): once a peer learns the client's
+	// external ip:port it can send in without prior contact. Unmatched
+	// datagrams are synthesised as IPv6/UDP (source pool6::sender) and
+	// injected onto the Yggdrasil leg via the same raw-packet path the ICMP
+	// translation uses; they create no session state and refresh no timers.
+	filterEndpointIndependent
 )
 
 func parseUDPFilterMode(s string) udpFilterMode {
-	if strings.EqualFold(strings.TrimSpace(s), "address-and-port-dependent") {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "address-and-port-dependent":
 		return filterAddressAndPortDependent
+	case "endpoint-independent":
+		return filterEndpointIndependent
+	default:
+		return filterAddressDependent
 	}
-	return filterAddressDependent
 }
 
 func (m udpFilterMode) String() string {
-	if m == filterAddressAndPortDependent {
+	switch m {
+	case filterAddressAndPortDependent:
 		return "address-and-port-dependent"
+	case filterEndpointIndependent:
+		return "endpoint-independent"
+	default:
+		return "address-dependent"
 	}
-	return "address-dependent"
 }
 
 // udpSession tracks one client→destination flow through its BIB.
@@ -442,7 +460,9 @@ func (s *Service) udpForwardLoop(sess *udpSession, key sessionKey) {
 // arriving on the NAT-assigned port is demuxed to a per-tuple session
 // (honouring the configured filtering behaviour) and relayed into its gVisor
 // endpoint, which routes it from pool6::serverIP back to the client
-// (checksums and outbound IPv6 fragmentation included).
+// (checksums and outbound IPv6 fragmentation included). Under
+// endpoint-independent filtering, datagrams from senders with no matching
+// flow are instead synthesised as IPv6/UDP and injected onto the client leg.
 func (s *Service) udpReplyLoop(bib *udpBIB, bk bibKey) {
 	defer func() {
 		// If we exit because the socket was closed (idle expiry or shutdown),
@@ -467,11 +487,50 @@ func (s *Service) udpReplyLoop(bib *udpBIB, bk bibKey) {
 		}
 		sess := s.demuxUDPReply(bib, raddr, lg)
 		if sess == nil {
-			continue // filtered: no matching flow under the current policy
+			// No matching flow. Under endpoint-independent filtering the
+			// sender is still entitled to delivery — inject the datagram as
+			// a synthesised IPv6 packet rather than dropping it. This is
+			// pure forwarding: no session is created, no session/BIB timer
+			// is refreshed (RFC 6146 §5.3: only client outbound traffic
+			// extends mappings), so unsolicited senders cannot pin state.
+			if s.settings.Load().udpFiltering == filterEndpointIndependent {
+				s.injectUnsolicitedUDP(bk, raddr, buf[:n], lg)
+			}
+			continue
 		}
 		if _, err := sess.conn6.Write(buf[:n]); err != nil {
 			continue // endpoint gone; its forward loop performs the teardown
 		}
+	}
+}
+
+// injectUnsolicitedUDP delivers one datagram from a never-contacted IPv4
+// sender to the client behind the BIB identified by bk (RFC 4787 REQ-8,
+// endpoint-independent filtering). The per-tuple gVisor endpoint that normal
+// replies flow through does not exist for this sender, so the datagram is
+// rebuilt as IPv6/UDP — source pool6::senderIP, destination the client's
+// Yggdrasil address/port — checksummed and injected via the same raw-packet
+// path the ICMP translation uses; oversized payloads are fragmented on the
+// way out exactly like synthesised echo replies.
+func (s *Service) injectUnsolicitedUDP(bk bibKey, raddr *net.UDPAddr, payload []byte, lg *log.Logger) {
+	var srcV4 [4]byte
+	copy(srcV4[:], raddr.IP.To4())
+	src6 := s.pref64.Embed(net.IP(srcV4[:])).To16()
+
+	pkt := buildIPv6UDPDatagram(src6, bk.srcAddr[:], uint16(raddr.Port), bk.srcPort, payload)
+	ident := uint32(replyFragIdent.Add(1))
+	for _, p := range fragmentIPv6Packet(pkt, int(s.ns.MTU()), ident) {
+		if _, err := s.ns.WritePacket(p); err != nil {
+			if lg != nil {
+				lg.Debugf("NAT64 UDP(EIF) inject to %s.%d from %s:%d: %v",
+					net.IP(bk.srcAddr[:]).String(), bk.srcPort, raddr.IP.String(), raddr.Port, err)
+			}
+			return
+		}
+	}
+	if lg != nil {
+		lg.Debugf("NAT64 UDP(EIF) delivered %d bytes to %s.%d from %s:%d (no matching flow)",
+			len(payload), net.IP(bk.srcAddr[:]).String(), bk.srcPort, raddr.IP.String(), raddr.Port)
 	}
 }
 
@@ -487,9 +546,10 @@ func (s *Service) udpReplyLoop(bib *udpBIB, bk bibKey) {
 //     address this BIB has an active flow toward is accepted and delivered
 //     into that flow's session.
 //
-// A datagram matching no flow at all is dropped in every mode: endpoint-
-// independent filtering would require injecting packets onto the client leg
-// from sources the client never contacted, which is not implemented.
+// A datagram matching no flow at all is dropped in every mode EXCEPT
+// endpoint-independent filtering, where udpReplyLoop injects it onto the
+// client leg directly (no per-tuple endpoint exists to relay through — see
+// filterEndpointIndependent).
 func (s *Service) demuxUDPReply(bib *udpBIB, raddr *net.UDPAddr, lg *log.Logger) *udpSession {
 	var ip4 [4]byte
 	copy(ip4[:], raddr.IP.To4())

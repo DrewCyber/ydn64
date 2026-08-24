@@ -294,9 +294,10 @@ func TestAppConfigValidate_UDPFiltering(t *testing.T) {
 			expectedVal: "address-and-port-dependent",
 		},
 		{
-			name:      "Endpoint-independent rejected (not implemented)",
-			val:       "endpoint-independent",
-			expectErr: true,
+			name:        "Endpoint-independent accepted (RFC 4787 REQ-8)",
+			val:         "ENDPOINT-INDEPENDENT",
+			expectErr:   false,
+			expectedVal: "endpoint-independent",
 		},
 		{
 			name:      "Garbage rejected",

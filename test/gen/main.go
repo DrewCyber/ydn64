@@ -64,7 +64,7 @@ func main() {
 	dns64Default := flag.String("dns64-default", "8.8.8.8:53", "Dns64Default forwarder host:port (role=ydn64 only)")
 	dns64Invalid := flag.String("dns64-invalid", "ignore", "Dns64InvalidAddress (role=ydn64 only)")
 	nat64Enable := flag.Bool("nat64-enable", true, "Nat64Enable (role=ydn64 only)")
-	udpFiltering := flag.String("udp-filtering", "address-dependent", `Nat64UdpFiltering: "address-dependent" or "address-and-port-dependent" (role=ydn64 only)`)
+	udpFiltering := flag.String("udp-filtering", "address-dependent", `Nat64UdpFiltering: "address-dependent", "address-and-port-dependent" or "endpoint-independent" (role=ydn64 only)`)
 	dns64Enable := flag.Bool("dns64-enable", true, "Dns64Enable (role=ydn64 only)")
 	yggZone := flag.Bool("ygg-zone", true, "include the .ygg Dns64Zones entry (role=ydn64 only)")
 	ifmtu := flag.Int("ifmtu", 1500, "IfMTU for the generated node config(s)")

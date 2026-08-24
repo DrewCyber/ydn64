@@ -316,9 +316,15 @@ via a raw socket. There is no IP-header translation anywhere in the path.
   punching) works through `ydn64`'s NAT64. Which inbound IPv4 senders are
   relayed back is configurable via `Nat64UdpFiltering`: `address-dependent`
   (the RFC 6146 §5.2-mandated default — any port of an already-contacted
-  server IP) or `address-and-port-dependent` (strictest; exact tuple only).
-  True endpoint-independent *filtering* (relaying datagrams from
-  never-contacted senders onto the client leg) is not implemented. TCP
+  server IP), `address-and-port-dependent` (strictest; exact tuple only), or
+  `endpoint-independent` — datagrams from ANY sender are delivered to a
+  mapped client, even senders it never contacted: unsolicited inbound is
+  synthesised as IPv6/UDP (`pool6::sender`) and injected onto the Yggdrasil
+  leg, creating no session state and refreshing no timers. This completes
+  hole punching: after a peer learns the client's external mapping it can
+  send inbound without prior contact. Unsolicited delivery is off by default
+  because it widens the inbound surface of every mapped client; enable it
+  when P2P reachability matters more than strict filtering. TCP
   connections are still proxied one-outbound-socket-per-connection.
 - **No DNSSEC validation.** `ydn64` is a security-oblivious DNS64 in the
   RFC 6147 §3 sense; synthesised answers cannot be validated by the client.

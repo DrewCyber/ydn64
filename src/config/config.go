@@ -269,14 +269,13 @@ func (c *AppConfig) Validate() error {
 		} else {
 			c.Nat64UdpFiltering = strings.ToLower(c.Nat64UdpFiltering)
 			switch c.Nat64UdpFiltering {
-			case "address-dependent", "address-and-port-dependent":
-				// RFC 6146 §5.2's mandated default and the stricter
-				// pre-EIM behaviour. "endpoint-independent" (RFC 4787
-				// REQ-8's other option) is not implemented: delivering
-				// datagrams from never-contacted sources would require
-				// raw injection onto the client leg.
+			case "address-dependent", "address-and-port-dependent", "endpoint-independent":
+				// RFC 6146 §5.2's mandated default, the stricter
+				// pre-EIM behaviour, and RFC 4787 REQ-8's
+				// endpoint-independent filtering (any external sender may
+				// deliver to a mapped client; enables hole punching).
 			default:
-				return fmt.Errorf(`Nat64UdpFiltering must be "address-dependent" or "address-and-port-dependent", got %q`, c.Nat64UdpFiltering)
+				return fmt.Errorf(`Nat64UdpFiltering must be "address-dependent", "address-and-port-dependent" or "endpoint-independent", got %q`, c.Nat64UdpFiltering)
 			}
 		}
 		if c.Nat64MaxTCPConnections <= 0 {

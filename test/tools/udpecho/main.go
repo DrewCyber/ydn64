@@ -38,6 +38,34 @@
 // payloads are intact, and asserts that BOTH servers observed the identical
 // client ip:port — the definition of endpoint-independent mapping (RFC 4787
 // REQ-1). Exits non-zero if the mappings differ or any reply is missing.
+//
+// EIF probe/receiver mode (endpoint-independent filtering check):
+//
+//	udpecho -eif <server-addr> <wait-seconds> <infile> <outfile>
+//
+// Phase 1 sends infile to server-addr from ONE long-lived socket and waits
+// for the tagged echo, printing
+//
+//	MAPPING client=<ip>:<port>
+//
+// — the external (NAT-assigned) identity of the socket as seen by the
+// server. Phase 2 keeps the SAME socket open and waits up to <wait-seconds>
+// for an UNSOLICITED datagram (a hole punch arriving at the mapped port
+// from a never-contacted sender). On receipt it writes the payload verbatim
+// to outfile, prints
+//
+//	EIFRECV from=<ip>:<port> bytes=<n>
+//
+// and exits 0. If nothing arrives it exits non-zero (the negative test:
+// under address-dependent/default filtering the datagram must be dropped).
+//
+// Fire-and-forget sender mode:
+//
+//	udpecho -send [-bind <ip>] <target-addr> <infile>
+//
+// Sends infile as one datagram to target-addr from an ephemeral port (or
+// the -bind address) and exits immediately without waiting for any reply —
+// plays the "never-contacted peer" in the EIF case.
 package main
 
 import (
@@ -46,6 +74,8 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -216,18 +246,110 @@ func runEIMClient(serverA, serverB, inFile, outFileA, outFileB string) {
 func main() {
 	once := flag.Bool("once", false, "one-shot client mode")
 	eim := flag.Bool("eim", false, "EIM probe client mode: <srv1> <srv2> <infile> <out1> <out2>")
+	eif := flag.Bool("eif", false, "EIF probe+receiver mode: <server> <wait-secs> <infile> <outfile>")
+	send := flag.Bool("send", false, "fire-and-forget sender: [-bind ip] <target> <infile>")
+	bind := flag.String("bind", "", "send mode: bind the source socket to this IPv4 address")
 	tagClient := flag.Bool("tag-client", false, "server mode: prefix replies with the observed client address")
 	flag.Parse()
 
 	switch {
-	case !*once && !*eim && flag.NArg() == 1:
+	case !*once && !*eim && !*eif && !*send && flag.NArg() == 1:
 		runServer(flag.Arg(0), *tagClient)
 	case *once && flag.NArg() == 3:
 		runClient(flag.Arg(0), flag.Arg(1), flag.Arg(2))
 	case *eim && flag.NArg() == 5:
 		runEIMClient(flag.Arg(0), flag.Arg(1), flag.Arg(2), flag.Arg(3), flag.Arg(4))
+	case *eif && flag.NArg() == 4:
+		waitSecs, err := strconv.Atoi(flag.Arg(1))
+		if err != nil || waitSecs <= 0 {
+			log.Fatalf("udpecho: -eif wait-seconds must be a positive integer, got %q", flag.Arg(1))
+		}
+		runEIFClient(flag.Arg(0), waitSecs, flag.Arg(2), flag.Arg(3))
+	case *send && flag.NArg() == 2:
+		runSend(*bind, flag.Arg(0), flag.Arg(1))
 	default:
 		flag.Usage()
 		os.Exit(2)
 	}
+}
+
+// runEIFClient implements the endpoint-independent-filtering probe: phase 1
+// learns the socket's external mapping from a tagged echo server, phase 2
+// waits on the same socket for an unsolicited datagram (see the -eif docs).
+func runEIFClient(probeServer string, waitSecs int, inFile, outFile string) {
+	payload, err := os.ReadFile(inFile)
+	if err != nil {
+		log.Fatalf("udpecho: read %s: %v", inFile, err)
+	}
+	raddr, err := net.ResolveUDPAddr("udp", probeServer)
+	if err != nil {
+		log.Fatalf("udpecho: resolve %s: %v", probeServer, err)
+	}
+
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{})
+	if err != nil {
+		log.Fatalf("udpecho: listen: %v", err)
+	}
+	defer conn.Close()
+
+	// Phase 1: create the mapping and learn its external identity.
+	if _, err := conn.WriteToUDP(payload, raddr); err != nil {
+		log.Fatalf("udpecho: probe send: %v", err)
+	}
+	buf := make([]byte, 65535)
+	_ = conn.SetReadDeadline(time.Now().Add(replyTimeout))
+	n, _, err := conn.ReadFromUDP(buf)
+	if err != nil {
+		log.Fatalf("udpecho: no mapping reply within %v: %v", replyTimeout, err)
+	}
+	tag, body, ok := splitTag(buf[:n])
+	if !ok {
+		log.Fatalf("udpecho: mapping reply lacks client tag (run the server with -tag-client)")
+	}
+	if !bytes.Equal(body, payload) {
+		log.Fatalf("udpecho: mapping reply payload mismatch (%d bytes)", len(body))
+	}
+	mapping := strings.TrimPrefix(tag, "client=")
+	log.Printf("udpecho: MAPPING client=%s", mapping)
+
+	// Phase 2: same socket, now waiting for an unsolicited datagram.
+	_ = conn.SetReadDeadline(time.Now().Add(time.Duration(waitSecs) * time.Second))
+	n, from, err := conn.ReadFromUDP(buf)
+	if err != nil {
+		log.Fatalf("udpecho: no unsolicited datagram within %ds: %v", waitSecs, err)
+	}
+	if err := os.WriteFile(outFile, buf[:n], 0644); err != nil {
+		log.Fatalf("udpecho: write %s: %v", outFile, err)
+	}
+	log.Printf("udpecho: EIFRECV from=%s bytes=%d", from.String(), n)
+}
+
+// runSend fires one datagram at target and exits; used as the
+// never-contacted peer in the EIF case.
+func runSend(bindIP, target, inFile string) {
+	payload, err := os.ReadFile(inFile)
+	if err != nil {
+		log.Fatalf("udpecho: read %s: %v", inFile, err)
+	}
+	raddr, err := net.ResolveUDPAddr("udp", target)
+	if err != nil {
+		log.Fatalf("udpecho: resolve %s: %v", target, err)
+	}
+	laddr := &net.UDPAddr{}
+	if bindIP != "" {
+		ip := net.ParseIP(bindIP)
+		if ip == nil || ip.To4() == nil {
+			log.Fatalf("udpecho: -bind wants an IPv4 address, got %q", bindIP)
+		}
+		laddr = &net.UDPAddr{IP: ip}
+	}
+	conn, err := net.ListenUDP("udp4", laddr)
+	if err != nil {
+		log.Fatalf("udpecho: listen %s: %v", bindIP, err)
+	}
+	defer conn.Close()
+	if _, err := conn.WriteToUDP(payload, raddr); err != nil {
+		log.Fatalf("udpecho: send: %v", err)
+	}
+	log.Printf("udpecho: sent %d bytes to %s from %s", len(payload), target, conn.LocalAddr())
 }

@@ -228,7 +228,7 @@ func TestParseUDPFilterMode(t *testing.T) {
 		{"address-dependent", filterAddressDependent},
 		{"ADDRESS-DEPENDENT", filterAddressDependent},
 		{" address-and-port-dependent ", filterAddressAndPortDependent},
-		{"endpoint-independent", filterAddressDependent}, // not implemented; falls back to default
+		{"Endpoint-Independent", filterEndpointIndependent},
 		{"garbage", filterAddressDependent},
 	}
 	for _, tc := range cases {

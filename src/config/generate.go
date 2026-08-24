@@ -236,6 +236,10 @@ func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string, peers, allowed
 	sb.WriteString("  #     client has already sent to is accepted.\n")
 	sb.WriteString("  #   \"address-and-port-dependent\" - additionally requires the exact\n")
 	sb.WriteString("  #     server port (strictest; the pre-EIM behaviour).\n")
+	sb.WriteString("  #   \"endpoint-independent\" - datagrams from ANY IPv4 sender are\n")
+	sb.WriteString("  #     delivered as long as the client has a mapping, even senders\n")
+	sb.WriteString("  #     it never contacted. Required for hole punching\n")
+	sb.WriteString("  #     (STUN/ICE) to receive inbound traffic through NAT64.\n")
 	sb.WriteString("  # Reloadable via SIGHUP.\n")
 	sb.WriteString("  Nat64UdpFiltering: \"address-dependent\"\n\n")
 

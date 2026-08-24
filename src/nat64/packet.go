@@ -2,6 +2,52 @@ package nat64
 
 import "encoding/binary"
 
+// buildIPv6UDPDatagram constructs a raw IPv6 + UDP datagram ready to be
+// injected into the Yggdrasil network. Used by endpoint-independent
+// filtering (RFC 4787 REQ-8) to deliver datagrams from senders the client
+// never contacted: no per-tuple gVisor endpoint exists to relay through, so
+// the packet is synthesised directly (the same injection path the ICMPv6
+// echo/error translation uses).
+//
+//	srcIP       — pool6::senderIPv4 (the translated source the client expects)
+//	dstIP       — the client's Yggdrasil address
+//	srcPort     — the real sender's IPv4 port
+//	dstPort     — the client's source port (the BIB key's port)
+//	payload     — the datagram body, copied verbatim from the IPv4 side
+func buildIPv6UDPDatagram(srcIP, dstIP []byte, srcPort, dstPort uint16, payload []byte) []byte {
+	udpLen := 8 + len(payload)
+	pkt := make([]byte, 40+udpLen)
+
+	// ── IPv6 fixed header (40 bytes) ─────────────────────────────────────────
+	pkt[0] = 0x60
+	binary.BigEndian.PutUint16(pkt[4:6], uint16(udpLen))
+	pkt[6] = 17 // Next header = UDP
+	pkt[7] = 64 // Hop limit
+	copy(pkt[8:24], srcIP)
+	copy(pkt[24:40], dstIP)
+
+	// ── UDP header (8 bytes at offset 40) ────────────────────────────────────
+	binary.BigEndian.PutUint16(pkt[40:42], srcPort)
+	binary.BigEndian.PutUint16(pkt[42:44], dstPort)
+	binary.BigEndian.PutUint16(pkt[44:46], uint16(udpLen))
+	// pkt[46:48] = checksum — filled in below
+
+	// ── Payload ───────────────────────────────────────────────────────────────
+	copy(pkt[48:], payload)
+
+	// ── UDP checksum over the IPv6 pseudo-header (RFC 2460 §8.1 / RFC 768) ───
+	cs := ipv6UpperLayerChecksum(pkt[8:24], pkt[24:40], 17, pkt[40:40+udpLen])
+	// RFC 768 §3.2 / RFC 8200 §8.1: a computed checksum of 0x0000 MUST be
+	// transmitted as 0xFFFF (zero is the "no checksum" marker IPv4 allows
+	// but IPv6 does not).
+	if cs == 0 {
+		cs = 0xffff
+	}
+	binary.BigEndian.PutUint16(pkt[46:48], cs)
+
+	return pkt
+}
+
 // buildIPv6ICMPEchoReplyPacket constructs a raw IPv6 + ICMPv6 Echo Reply
 // packet ready to be injected into the Yggdrasil network, used by NAT64 to
 // translate a real ICMPv4 Echo Reply back into ICMPv6.

@@ -207,6 +207,7 @@ func buildIPv6UDPTestPacket(srcIP, dstIP net.IP, srcPort, dstPort uint16, payloa
 type udpTestEnv struct {
 	svc      *Service
 	nic      *chanLinkEndpoint
+	cap      *capturingNetStack // records raw injections (WritePacket)
 	stack    *stack.Stack
 	echoPort uint16
 }
@@ -241,7 +242,7 @@ func newUDPTestEnv(t *testing.T, udpTimeout int) *udpTestEnv {
 			tcpip.MaskFrom(string(ipnet.Mask)),
 		)
 		if tcpErr != nil {
-			t.Fatalf("NewSubnet(%q): %v", cidr, tcpErr)
+			t.Fatalf("NewSubnet(%q): %v", cidr, err)
 		}
 		st.AddRoute(tcpip.Route{Destination: subnet, NIC: 1})
 	}
@@ -265,11 +266,12 @@ func newUDPTestEnv(t *testing.T, udpTimeout int) *udpTestEnv {
 		}
 	}()
 
+	ns := &capturingNetStack{fakeNetStack: fakeNetStack{st: st}}
 	svc, err := NewService(
 		config.NAT64Config{Pool6: "300:1:2:3::/96", UDPTimeout: udpTimeout},
 		[]string{"200:a:b:c::/64"},
 		nil, // no ignored subnets: the echo server lives on 127.0.0.1
-		&fakeNetStack{st: st},
+		ns,
 	)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -285,6 +287,7 @@ func newUDPTestEnv(t *testing.T, udpTimeout int) *udpTestEnv {
 	return &udpTestEnv{
 		svc:      svc,
 		nic:      nic,
+		cap:      ns,
 		stack:    st,
 		echoPort: uint16(echoConn.LocalAddr().(*net.UDPAddr).Port),
 	}
