@@ -34,6 +34,16 @@ const (
 	// (RFC 1035 §2.3.4, RFC 6891 §6.2.5).
 	legacyMaxMsgSize = 512
 
+	// maxTCPQueriesInFlight bounds how many queries from a single
+	// DNS-over-TCP connection may be processed at once (RFC 7766 §6.2.1.1
+	// pipelining). When the cap is reached the connection's read loop
+	// pauses — backpressure, not unbounded fan-out — so one persistent
+	// connection cannot multiply its work past the Dns64MaxConcurrentQueries
+	// budget that admitted it. Generous enough that real-world pipelines
+	// (typically ≤ 100 outstanding queries per RFC 7766 §6.2.2's own
+	// client guidance) never hit it in practice.
+	maxTCPQueriesInFlight = 32
+
 	// maxUDPSize caps the negotiated UDP payload size even when clients
 	// advertise larger buffers — balances respecting client preferences
 	// against fragmentation risks in overlay networks. Matches BIND/Unbound
@@ -443,14 +453,60 @@ func (s *Service) serveTCP(listener *gonet.TCPListener, logger *log.Logger) {
 	}
 }
 
-// serveTCPConn serves queries for a single DNS-over-TCP connection one at a
-// time (RFC 7766 permits, but does not require, pipelining), closing the
-// connection once dnsTCPIdleTimeout elapses without a new query. Each query
-// consumes a per-source rate token; an over-budget source's connection is
-// closed so it cannot hold its concurrency slot while hammering upstream.
+// serveTCPConn serves queries for a single DNS-over-TCP connection,
+// processing pipelined queries concurrently per RFC 7766 §6.2.1.1: each
+// framed query is dispatched to its own goroutine the moment it arrives and
+// responses are written as soon as they are ready — possibly out of order,
+// which §7 explicitly allows (clients MUST match responses by Message ID).
+// Processing queries serially instead would let one slow upstream lookup
+// head-of-line block every later query on the connection, which is exactly
+// what pipelining exists to avoid. The framing read loop stays sequential
+// so per-message rate-limit tokens are still consumed in arrival order, and
+// because dns.Conn.ReadMsg only returns complete messages, resetting the
+// idle timeout after each read is the full-message reset §6.2.3 recommends
+// against slow-read attacks. Responses go through one writer serialised by
+// a mutex (dns.Conn is not safe for concurrent WriteMsg); after the first
+// write failure the connection is marked broken and torn down, and pending
+// handlers abandon their replies rather than attempting to send them
+// (§6.2.4). maxTCPQueriesInFlight caps the per-connection fan-out.
 func (s *Service) serveTCPConn(conn net.Conn, logger *log.Logger) {
-	defer conn.Close()
 	dc := &dns.Conn{Conn: conn}
+	var (
+		// writeMu serialises response writes on dc; it also guards broken.
+		writeMu sync.Mutex
+		broken  bool
+		// slots bounds the in-flight query goroutines for this connection;
+		// acquiring from the read loop applies backpressure at the cap.
+		slots = make(chan struct{}, maxTCPQueriesInFlight)
+		// handlers tracks this connection's in-flight query goroutines so
+		// the deferred wait below covers them even though Service.wg (used
+		// by Drain) already counts them globally.
+		handlers sync.WaitGroup
+	)
+	// Defers run LIFO: on any exit path the connection is closed first —
+	// failing pending writes immediately instead of leaving them parked
+	// until their deadline — and only then do we wait for the in-flight
+	// query goroutines to notice and unwind.
+	defer handlers.Wait()
+	defer conn.Close()
+
+	writeResponse := func(resp *dns.Msg) {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		if broken {
+			return // connection already failed; §6.2.4 forbids re-sending
+		}
+		_ = conn.SetWriteDeadline(time.Now().Add(dnsTCPIdleTimeout))
+		if err := dc.WriteMsg(resp); err != nil {
+			logger.Debugf("DNS64: TCP write error to %s: %v", conn.RemoteAddr(), err)
+			broken = true
+			// Tear down now so the read loop stops admitting work and the
+			// remaining writers fail fast instead of queueing behind a dead
+			// connection.
+			conn.Close()
+		}
+	}
+
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(dnsTCPIdleTimeout))
 		req, err := dc.ReadMsg()
@@ -467,17 +523,47 @@ func (s *Service) serveTCPConn(conn net.Conn, logger *log.Logger) {
 		}
 		logger.Debugf("DNS64: TCP query from %s", conn.RemoteAddr())
 
-		resp := s.proxy.handle(req)
-		_ = conn.SetWriteDeadline(time.Now().Add(dnsTCPIdleTimeout))
-		if err := dc.WriteMsg(resp); err != nil {
-			logger.Debugf("DNS64: TCP write error to %s: %v", conn.RemoteAddr(), err)
+		// Backpressure: usually a slot is free; only pay for a timer when
+		// the cap is actually reached. If the cap cannot drain within the
+		// idle budget the handlers are wedged — give up on the connection
+		// rather than pinning its concurrency slot forever.
+		select {
+		case slots <- struct{}{}:
+		default:
+			t := time.NewTimer(dnsTCPIdleTimeout)
+			select {
+			case slots <- struct{}{}:
+				t.Stop()
+			case <-t.C:
+				logger.Debugf("DNS64: TCP connection from %s stuck over the in-flight cap; closing", conn.RemoteAddr())
+				return
+			}
+		}
+
+		writeMu.Lock()
+		giveUp := broken
+		writeMu.Unlock()
+		if giveUp {
+			<-slots
 			return
 		}
+
+		s.wg.Add(1)
+		handlers.Add(1)
+		go func(req *dns.Msg) {
+			defer s.wg.Done()
+			defer handlers.Done()
+			defer func() { <-slots }()
+
+			resp := s.proxy.handle(req)
+			writeResponse(resp)
+		}(req)
 	}
 }
 
-// Drain waits for all in-flight query work (UDP query goroutines and
-// DNS-over-TCP connection handlers) to finish, or until d elapses — used
+// Drain waits for all in-flight query work (UDP query goroutines,
+// DNS-over-TCP connection readers, and their per-query pipelining
+// goroutines) to finish, or until d elapses — used
 // during shutdown so cancellation doesn't cut answers mid-flight.
 func (s *Service) Drain(d time.Duration) {
 	done := make(chan struct{})

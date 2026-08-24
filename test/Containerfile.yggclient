@@ -10,13 +10,16 @@ RUN go install github.com/yggdrasil-network/yggdrasil-go/cmd/yggdrasil@latest &&
     go install github.com/yggdrasil-network/yggdrasil-go/cmd/yggdrasilctl@latest
 # Test-only helper shared with container A (see test/tools/udpecho): sends and
 # receives datagrams of any size, unlike busybox nc whose fixed receive buffer
-# truncates below the IPv6 fragmentation threshold. The helper is stdlib-only,
-# so it builds against a minimal standalone module instead of the ydn64
-# go.mod (which lives outside this build context).
+# truncates below the IPv6 fragmentation threshold. dnspipe pipelines DNS
+# queries over one TCP connection to verify RFC 7766 §6.2.1.1 concurrent
+# processing (test/cases/12_dns_tcp_pipelining.sh). Both helpers are
+# stdlib-only, so they build against a minimal standalone module instead of
+# the ydn64 go.mod (which lives outside this build context).
 COPY tools /src/tools
 WORKDIR /src
 RUN printf 'module udpecho\n\ngo 1.25\n' > go.mod && \
-    CGO_ENABLED=0 go build -o /out/udpecho ./tools/udpecho
+    CGO_ENABLED=0 go build -o /out/udpecho ./tools/udpecho && \
+    CGO_ENABLED=0 go build -o /out/dnspipe ./tools/dnspipe
 
 FROM alpine:3.20
 # traceroute: exercises NAT64 ICMP error translation from the client side
@@ -25,6 +28,7 @@ FROM alpine:3.20
 RUN apk add --no-cache ca-certificates bind-tools curl iproute2 tcpdump iputils traceroute
 COPY --from=build /go/bin/yggdrasil /go/bin/yggdrasilctl /usr/local/bin/
 COPY --from=build /out/udpecho /usr/local/bin/udpecho
+COPY --from=build /out/dnspipe /usr/local/bin/dnspipe
 COPY yggclient-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]

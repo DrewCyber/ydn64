@@ -4,9 +4,8 @@ ydn64 — RFC REFERENCE LIST
 Authoritative list of the RFCs that ydn64's NAT64 and DNS64 implementations
 are measured against, with current implementation status.
 
-Last reviewed: 2026-08-24 (TCP idle expiry per RFC 5382 REQ-5, UDP
-Endpoint-Independent Mapping per RFC 4787 REQ-1 / RFC 6146 §3.1/§5.2,
-and full RFC 6052 §2.2 prefix formats landed in one session)
+Last reviewed: 2026-08-24 (RFC 7766 §6.2.1.1/§7 concurrent processing of
+pipelined DNS-over-TCP queries landed in one session)
 Documented deviations: README.md, "Standards conformance and deliberate deviations"
 
 DESIGN GOAL: ydn64 aims to work well for Yggdrasil clients, NOT to be a
@@ -252,10 +251,22 @@ RFC 5452 — Measures for Making DNS More Resilient against Forged
     0x20 name randomisation is optional hardening; not
     implemented.                                                      [TODO]
 
-RFC 7766 — DNS Transport over TCP - Implementation Requirements    [PARTIAL]
+RFC 7766 — DNS Transport over TCP - Implementation Requirements      [DONE]
     §3 TCP support and §6.2.1 idle timeouts are implemented.          [DONE]
-    §6.2.1.1 concurrent processing of pipelined queries is not —
-    queries on one connection are serialised.                         [TODO]
+    §6.2.1.1 pipelined queries are processed concurrently per query:
+    each framed message is dispatched to its own goroutine as it
+    arrives and responses are written as soon as they complete,
+    possibly out of order — explicitly permitted by §7 (clients match
+    by Message ID). The framing read loop stays sequential so
+    per-message rate-limit tokens are consumed in arrival order, and
+    idle-timeout resets happen on full-message boundaries (§6.2.3's
+    slow-read defence). A per-connection in-flight cap applies
+    backpressure so one connection cannot fan out past
+    Dns64MaxConcurrentQueries; after the first write failure the
+    connection is torn down and queued replies abandoned (§6.2.4).
+    Verified by unit tests (slow/fast overtake, >cap bulk, disconnect
+    teardown, rate-limit close) and the black-box
+    test/cases/12_dns_tcp_pipelining.sh via test/tools/dnspipe.       [DONE]
 
 RFC 4074 — Common Misbehavior Against DNS Queries for IPv6 Addresses   [N/A]
     Informational; motivates RFC 6147 §5.1.2's RCODE handling rules.
