@@ -63,6 +63,7 @@ func main() {
 	allowedSources := flag.String("allowed-sources", "200::/7", "comma-separated AllowedSources CIDRs/IPs (role=ydn64 only)")
 	dns64Default := flag.String("dns64-default", "8.8.8.8:53", "Dns64Default forwarder host:port (role=ydn64 only)")
 	dns64Invalid := flag.String("dns64-invalid", "ignore", "Dns64InvalidAddress (role=ydn64 only)")
+	dns64Exclude := flag.String("dns64-exclude", "", `comma-separated IPv6 subnets for Dns64AAAAExcludedSubnets (RFC 6147 5.1.4, role=ydn64 only)`)
 	nat64Enable := flag.Bool("nat64-enable", true, "Nat64Enable (role=ydn64 only)")
 	udpFiltering := flag.String("udp-filtering", "address-dependent", `Nat64UdpFiltering: "address-dependent", "address-and-port-dependent" or "endpoint-independent" (role=ydn64 only)`)
 	dns64Enable := flag.Bool("dns64-enable", true, "Dns64Enable (role=ydn64 only)")
@@ -163,6 +164,9 @@ func main() {
 		merged["Dns64CacheExpiration"] = 300
 		merged["Dns64CachePurge"] = 600
 		merged["Dns64InvalidAddress"] = *dns64Invalid
+		if exclude := strings.Split(strings.TrimSpace(*dns64Exclude), ","); len(exclude) > 0 && exclude[0] != "" {
+			merged["Dns64AAAAExcludedSubnets"] = exclude
+		}
 		// Default (catch-all) zone: synthesise AAAA records from real A
 		// records using the NAT64 prefix, forwarding to Dns64Default (a
 		// real public resolver, 8.8.8.8:53 by default) — matches the

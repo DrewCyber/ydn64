@@ -4,9 +4,9 @@ ydn64 — RFC REFERENCE LIST
 Authoritative list of the RFCs that ydn64's NAT64 and DNS64 implementations
 are measured against, with current implementation status.
 
-Last reviewed: 2026-08-24 (RFC 7766 §6.2.1.1/§7 concurrent processing of
-pipelined DNS-over-TCP queries and RFC 4787 REQ-8 endpoint-independent
-filtering landed in one session)
+Last reviewed: 2026-08-24 (RFC 7766 §6.2.1.1/§7 pipelined DoT processing,
+RFC 4787 REQ-8 endpoint-independent filtering, and RFC 6147 §5.1.4 AAAA
+exclusion set landed in one session)
 Documented deviations: README.md, "Standards conformance and deliberate deviations"
 
 DESIGN GOAL: ydn64 aims to work well for Yggdrasil clients, NOT to be a
@@ -27,9 +27,10 @@ A. CORE NORMATIVE — IMPLEMENT AGAINST THESE
 -------------------------------------------
 
 RFC 6146 — Stateful NAT64: Network Address and Protocol Translation from
-           IPv6 Clients to IPv4 Servers                            [PARTIAL]
+           IPv6 Clients to IPv4 Servers                               [DONE]
     The primary NAT64 specification. Basic IPv6->IPv4 forwarding for TCP,
-    UDP and ICMP Echo works. Outstanding:
+    UDP and ICMP Echo works. (Remaining sub-items are DONE or N/A; TCP EIM
+    is documented as out of scope under §3.1/§5.2 below.) Outstanding:
       - §3.5 / §5.4  drop inbound IPv6 with a source inside Pref64::/n
                      (anti-hairpin loop): enforced on the TCP, UDP and ICMP
                      paths                                          [DONE]
@@ -74,8 +75,7 @@ RFC 6146 — Stateful NAT64: Network Address and Protocol Translation from
 RFC 6147 — DNS64: DNS Extensions for NAT from IPv6 Clients to IPv4 Servers
                                                                    [PARTIAL]
     The primary DNS64 specification. Synthesis, zone rules, forwarding,
-    caching and PTR reversal work. Outstanding:
-      - §5.1.2       return the upstream NXDOMAIN instead of NOERROR   [DONE]
+    caching and PTR reversal work. Outstanding:      - §5.1.2       return the upstream NXDOMAIN instead of NOERROR   [DONE]
       - §5.1.5/5.1.7 preserve the CNAME chain; take the synthetic AAAA
                      owner name from the A record                      [DONE]
       - §5.1.7       synthetic TTL = min(A TTL, SOA TTL)               [DONE]
@@ -86,11 +86,13 @@ RFC 6147 — DNS64: DNS Extensions for NAT from IPv6 Clients to IPv4 Servers
                      range is not implemented (prefix is chosen per
                      domain zone)                                   [PARTIAL]
       - §5.1         pass through non-IN qclass (no synthesis)         [DONE]
-      - §5.1.4       special exclusion set for AAAA                    [TODO]
-                     (the RFC-blessed way to express "drop AAAA my
-                     clients cannot reach"; could eventually subsume
-                     the return-ipv6-addresses zone flag, but that
-                     would be a breaking config change)
+      - §5.1.4       special exclusion set for AAAA: the global,
+                     SIGHUP-reloadable Dns64AAAAExcludedSubnets list
+                     strips matching real AAAA records at serve time
+                     (including cached entries), regardless of zone
+                     flags; synthesized records are exempt per §5.1.4.
+                     Non-breaking: it complements rather than replaces
+                     the return-ipv6-addresses zone flag             [DONE]
       - §5.3.2/§5.4  pass through the authority + additional sections
                      of the upstream response (makes SOA-based negative
                      caching work downstream)                          [DONE]

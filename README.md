@@ -247,6 +247,10 @@ RFC 6147 **Appendix A** explicitly anticipates this as an administrator
 choice; `ydn64` simply makes it the default. Set
 `return-ipv6-addresses: true` on a zone to get the conformant behaviour
 (this is what the `.ygg` zone does — those addresses *are* reachable).
+Independently of zone flags, real AAAA answers falling inside the global
+`Dns64AAAAExcludedSubnets` list are always stripped (RFC 6147 §5.1.4's
+special exclusion set) — the way to say "my clients cannot reach these
+addresses" for specific prefixes; synthesized records are never affected.
 
 **2. A records are suppressed for zones with `return-ipv4-addresses: false`.**
 RFC 6147 §5.3.3 says *"All other RRs MUST be returned unchanged. This

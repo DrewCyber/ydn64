@@ -16,13 +16,15 @@ import (
 )
 
 // proxyConfig holds the reloadable subset of DNS64 behaviour (Dns64Default,
-// Dns64Zones, Dns64InvalidAddress, IgnoredDstSubnets). It is swapped atomically by
-// proxy.reload() so query-handling goroutines never need to take a lock.
+// Dns64Zones, Dns64InvalidAddress, IgnoredDstSubnets, Dns64AAAAExcludedSubnets).
+// It is swapped atomically by proxy.reload() so query-handling goroutines
+// never need to take a lock.
 type proxyConfig struct {
-	zones          []zone
-	defaultForward string
-	ia             InvalidAddress
-	ignoredDstNets []*net.IPNet
+	zones            []zone
+	defaultForward   string
+	ia               InvalidAddress
+	ignoredDstNets   []*net.IPNet
+	excludedAAAANets []*net.IPNet
 }
 
 // proxy implements the DNS64 translation logic.
@@ -33,9 +35,10 @@ type proxy struct {
 }
 
 // reload atomically replaces the zone table, default forwarder,
-// InvalidAddress policy, and ignored destination subnets. Safe to call concurrently with in-flight queries.
-func (p *proxy) reload(defaultForward string, ia InvalidAddress, zones []zone, ignoredDstNets []*net.IPNet) {
-	p.cfg.Store(&proxyConfig{zones: zones, defaultForward: defaultForward, ia: ia, ignoredDstNets: ignoredDstNets})
+// InvalidAddress policy, ignored destination subnets, and the RFC 6147
+// §5.1.4 AAAA exclusion set. Safe to call concurrently with in-flight queries.
+func (p *proxy) reload(defaultForward string, ia InvalidAddress, zones []zone, ignoredDstNets, excludedAAAANets []*net.IPNet) {
+	p.cfg.Store(&proxyConfig{zones: zones, defaultForward: defaultForward, ia: ia, ignoredDstNets: ignoredDstNets, excludedAAAANets: excludedAAAANets})
 }
 
 // isIgnoredDst reports whether dstIPv4 is in one of the configured ignored destination subnets.
@@ -273,35 +276,48 @@ func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string
 		return resp, nil
 	}
 
-	// Cache hit?
+	// Exclusions (RFC 6147 §5.1.4) are reloadable, so they must be applied
+	// at serve time — a cached entry may predate the current set. Zone-flag
+	// filtering, by contrast, was already applied when the entry was stored,
+	// and re-running it here would wrongly strip cached SYNTHESIZED answers
+	// (their zone has no returnIPv6Addresses). If nothing usable remains
+	// under the current exclusions, fall through to A-based synthesis below
+	// — identical to what a fresh (cache-missing) lookup would produce.
+	var upResp *dns.Msg
 	if cached, ok := p.cache.get(cacheKeyFor(q)); ok {
-		resp := new(dns.Msg)
-		req.CopyTo(resp)
-		resp.Answer = cached
-		resp.Question[0].Qtype = dns.TypeAAAA
-		resp.Response = true
-		return resp, nil
+		cachedAnswer := p.dropExcludedAAAA(cached)
+		if containsAAAA(cachedAnswer) {
+			resp := new(dns.Msg)
+			req.CopyTo(resp)
+			resp.Answer = cachedAnswer
+			resp.Question[0].Qtype = dns.TypeAAAA
+			resp.Response = true
+			return resp, nil
+		}
 	}
 
-	// Query upstream AAAA.
-	upReq := new(dns.Msg)
-	req.CopyTo(upReq)
-	upReq.Question = []dns.Question{*q}
-	upResp, err := p.lookup(server, upReq)
-	if err != nil {
-		return nil, err
-	}
+	if upResp == nil {
+		// Query upstream AAAA.
+		upReq := new(dns.Msg)
+		req.CopyTo(upReq)
+		upReq.Question = []dns.Question{*q}
+		var err error
+		upResp, err = p.lookup(server, upReq)
+		if err != nil {
+			return nil, err
+		}
 
-	// RFC 6147 §5.1.2: A result with RCODE=3 (Name Error / NXDOMAIN) is returned to the client immediately.
-	if upResp.Rcode == dns.RcodeNameError {
-		resp := new(dns.Msg)
-		req.CopyTo(resp)
-		resp.Rcode = dns.RcodeNameError
-		resp.Ns = upResp.Ns
-		resp.Extra = upResp.Extra
-		resp.Question[0].Qtype = dns.TypeAAAA
-		resp.Response = true
-		return resp, nil
+		// RFC 6147 §5.1.2: A result with RCODE=3 (Name Error / NXDOMAIN) is returned to the client immediately.
+		if upResp.Rcode == dns.RcodeNameError {
+			resp := new(dns.Msg)
+			req.CopyTo(resp)
+			resp.Rcode = dns.RcodeNameError
+			resp.Ns = upResp.Ns
+			resp.Extra = upResp.Extra
+			resp.Question[0].Qtype = dns.TypeAAAA
+			resp.Response = true
+			return resp, nil
+		}
 	}
 
 	var answer []dns.RR
@@ -407,6 +423,11 @@ func containsAAAA(rrs []dns.RR) bool {
 }
 
 // filterAAAA selects AAAA records from rrs according to zone rules:
+//   - AAAA records inside the RFC 6147 §5.1.4 exclusion set
+//     (Dns64AAAAExcludedSubnets) are dropped first, regardless of zone flags.
+//     Per §5.1.4 this filtering applies to records the DNS64 did NOT
+//     synthesize itself — synthesized answers are built in synthesiseFromA
+//     and never pass through here.
 //   - Unspecified (::) is handled by InvalidAddress policy.
 //   - AAAA passes through only if zone.returnIPv6Addresses (this covers
 //     Yggdrasil-native 200::/7 addresses too — there is no special-casing
@@ -419,11 +440,12 @@ func containsAAAA(rrs []dns.RR) bool {
 //     containsAAAA, used by the caller to decide whether to fall through
 //     to A-record synthesis.
 func (p *proxy) filterAAAA(rrs []dns.RR, z *zone) []dns.RR {
-	out := make([]dns.RR, 0, len(rrs))
-	for _, rr := range rrs {
+	out := p.dropExcludedAAAA(rrs)
+	filtered := make([]dns.RR, 0, len(out))
+	for _, rr := range out {
 		a, ok := rr.(*dns.AAAA)
 		if !ok {
-			out = append(out, rr) // pass non-AAAA records through unchanged
+			filtered = append(filtered, rr) // pass non-AAAA records through unchanged
 			continue
 		}
 		ip := a.AAAA
@@ -435,16 +457,53 @@ func (p *proxy) filterAAAA(rrs []dns.RR, z *zone) []dns.RR {
 			case IAIgnore:
 				continue // drop [::] in AAAA context
 			case IAProcess:
-				out = append(out, rr) // return as-is
+				filtered = append(filtered, rr) // return as-is
 			}
 			continue
 		}
 
 		if z.returnIPv6Addresses {
-			out = append(out, rr)
+			filtered = append(filtered, rr)
 		}
 		// If zone has a prefix instead, this AAAA is skipped here;
 		// synthesis happens via A records in handleAAAA.
+	}
+	return filtered
+}
+
+// dropExcludedAAAA strips AAAA records inside the RFC 6147 §5.1.4 special
+// exclusion set (Dns64AAAAExcludedSubnets), passing everything else through
+// unchanged.
+//
+// It is applied at SERVE time — including on cache hits — because the set is
+// SIGHUP-reloadable and a cached answer may predate the current
+// configuration. Freshly synthesized answers are built after this point and
+// are therefore never filtered (§5.1.4 exempts records the DNS64 synthesized
+// itself); note that cached SYNTHESIZED entries are re-checked like any other
+// cached record, so excluding the node's own pool prefix would strip those
+// too — possible, but self-defeating.
+func (p *proxy) dropExcludedAAAA(rrs []dns.RR) []dns.RR {
+	cfg := p.cfg.Load()
+	if cfg == nil || len(cfg.excludedAAAANets) == 0 {
+		return rrs
+	}
+	out := make([]dns.RR, 0, len(rrs))
+	for _, rr := range rrs {
+		a, ok := rr.(*dns.AAAA)
+		if !ok {
+			out = append(out, rr)
+			continue
+		}
+		excluded := false
+		for _, n := range cfg.excludedAAAANets {
+			if n.Contains(a.AAAA) {
+				excluded = true
+				break
+			}
+		}
+		if !excluded {
+			out = append(out, rr)
+		}
 	}
 	return out
 }

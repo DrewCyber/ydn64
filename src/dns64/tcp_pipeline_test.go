@@ -66,7 +66,7 @@ func newPipelineTestService(upstream string) *Service {
 	p := &proxy{cache: newCache(300*time.Second, 600*time.Second, 0)}
 	p.reload(upstream, IAIgnore, []zone{
 		{domains: []string{"."}, prefix: testPref64()},
-	}, nil)
+	}, nil, nil)
 	return &Service{proxy: p, rateLimit: newSrcRateLimiter(0)}
 }
 

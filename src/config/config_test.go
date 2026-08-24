@@ -330,6 +330,35 @@ func TestAppConfigValidate_UDPFiltering(t *testing.T) {
 
 // TestGenconfOutputPassesValidation guards against template drift: whatever
 // -genconf prints must always pass AppConfig.Validate as-is.
+func TestAppConfigValidate_AAAAExcludedSubnets(t *testing.T) {
+	tests := []struct {
+		name      string
+		vals      []string
+		expectErr bool
+	}{
+		{name: "nil list is fine", vals: nil},
+		{name: "IPv6 CIDR accepted", vals: []string{"200::/7"}},
+		{name: "WKP accepted", vals: []string{"64:ff9b::/96"}},
+		{name: "bare IPv6 accepted as /128", vals: []string{"2606:4700::1111"}},
+		{name: "mixed entries accepted", vals: []string{"200::/7", "64:ff9b::/96"}},
+		{name: "IPv4 CIDR rejected (cannot match AAAA)", vals: []string{"10.0.0.0/8"}, expectErr: true},
+		{name: "garbage rejected", vals: []string{"not-a-subnet"}, expectErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := nat64Base()
+			cfg.Dns64AAAAExcludedSubnets = tc.vals
+			err := cfg.Validate()
+			if tc.expectErr && err == nil {
+				t.Errorf("expected error for %v, got nil", tc.vals)
+			}
+			if !tc.expectErr && err != nil {
+				t.Errorf("unexpected error for %v: %v", tc.vals, err)
+			}
+		})
+	}
+}
+
 func TestGenconfOutputPassesValidation(t *testing.T) {
 	out, err := Generate(GenerateOverrides{})
 	if err != nil {

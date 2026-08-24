@@ -32,7 +32,10 @@ type DNS64Config struct {
 	MaxQueries      int
 	RateLimit       int
 	InvalidAddress  string
-	Zones           []ZoneConfig
+	// ExcludedAAAASubnets is the RFC 6147 §5.1.4 special exclusion set:
+	// real AAAA records within these IPv6 subnets are stripped from answers.
+	ExcludedAAAASubnets []string
+	Zones               []ZoneConfig
 }
 
 // NAT64Config holds configuration for the NAT64 service.
@@ -118,6 +121,7 @@ type AppConfig struct {
 	Dns64MaxConcurrentQueries int          `json:"Dns64MaxConcurrentQueries"`
 	Dns64RateLimit            int          `json:"Dns64RateLimit"`
 	Dns64InvalidAddress       string       `json:"Dns64InvalidAddress"`
+	Dns64AAAAExcludedSubnets  []string     `json:"Dns64AAAAExcludedSubnets"`
 	Dns64Zones                []ZoneConfig `json:"Dns64Zones"`
 }
 
@@ -184,16 +188,17 @@ func (c *AppConfig) NAT64() NAT64Config {
 // DNS64 returns the DNS64Config view of the merged configuration.
 func (c *AppConfig) DNS64() DNS64Config {
 	return DNS64Config{
-		Enable:          c.Dns64Enable,
-		Listen:          c.Dns64Listen,
-		Default:         c.Dns64Default,
-		CacheExp:        c.Dns64CacheExpiration,
-		CachePurge:      c.Dns64CachePurge,
-		MaxCacheEntries: c.Dns64MaxCacheEntries,
-		MaxQueries:      c.Dns64MaxConcurrentQueries,
-		RateLimit:       c.Dns64RateLimit,
-		InvalidAddress:  c.Dns64InvalidAddress,
-		Zones:           c.Dns64Zones,
+		Enable:              c.Dns64Enable,
+		Listen:              c.Dns64Listen,
+		Default:             c.Dns64Default,
+		CacheExp:            c.Dns64CacheExpiration,
+		CachePurge:          c.Dns64CachePurge,
+		MaxCacheEntries:     c.Dns64MaxCacheEntries,
+		MaxQueries:          c.Dns64MaxConcurrentQueries,
+		RateLimit:           c.Dns64RateLimit,
+		InvalidAddress:      c.Dns64InvalidAddress,
+		ExcludedAAAASubnets: c.Dns64AAAAExcludedSubnets,
+		Zones:               c.Dns64Zones,
 	}
 }
 
@@ -240,6 +245,22 @@ func (c *AppConfig) Validate() error {
 			if net.ParseIP(dst) == nil {
 				return fmt.Errorf("IgnoredDstSubnets: invalid entry %q", dst)
 			}
+		}
+	}
+
+	for _, sub := range c.Dns64AAAAExcludedSubnets {
+		_, cidr, err := net.ParseCIDR(sub)
+		if err != nil {
+			if ip := net.ParseIP(sub); ip != nil {
+				continue // bare IP: treated as a /128 by ParseIPNets
+			}
+			return fmt.Errorf("Dns64AAAAExcludedSubnets: invalid entry %q", sub)
+		}
+		// The exclusion set filters AAAA (IPv6) records; an IPv4 network
+		// could never match one and would silently do nothing, so reject it
+		// as a probable config mistake.
+		if cidr.IP.To4() != nil {
+			return fmt.Errorf("Dns64AAAAExcludedSubnets: entry %q is IPv4; only IPv6 subnets can exclude AAAA records", sub)
 		}
 	}
 

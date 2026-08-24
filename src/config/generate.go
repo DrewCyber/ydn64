@@ -300,6 +300,14 @@ func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string, peers, allowed
 	sb.WriteString("  #   \"discard\" - discard this address\n")
 	sb.WriteString("  Dns64InvalidAddress: \"ignore\"\n\n")
 
+	sb.WriteString("  # RFC 6147 section 5.1.4 special exclusion set for AAAA records.\n")
+	sb.WriteString("  # Real AAAA answers falling inside any of these IPv6 subnets are\n")
+	sb.WriteString("  # removed from responses — the standards-blessed way to say \"my\n")
+	sb.WriteString("  # clients cannot reach these addresses\" (e.g. a leaked\n")
+	sb.WriteString("  # \"64:ff9b::/96\"). Synthesized answers are never affected, and the\n")
+	sb.WriteString("  # list may be empty. Reloadable via SIGHUP.\n")
+	sb.WriteString("  # Dns64AAAAExcludedSubnets: [\"64:ff9b::/96\"]\n\n")
+
 	sb.WriteString("  Dns64Zones: [\n")
 	sb.WriteString("    # Default zone: synthesise AAAA records from A records using the NAT64 prefix.\n")
 	sb.WriteString("    # A zone \"prefix\" is a /96 network written out in full (its last\n")

@@ -85,7 +85,7 @@ func TestDNS64IgnoredDstSubnets(t *testing.T) {
 			returnIPv4Addresses: false,
 			returnIPv6Addresses: false,
 		},
-	}, ignoredNets)
+	}, ignoredNets, nil)
 
 	// Test public IP synthesis -> should succeed
 	{
@@ -193,7 +193,7 @@ func TestDNS64ErrorRcodeHandling(t *testing.T) {
 			returnIPv4Addresses: false,
 			returnIPv6Addresses: false,
 		},
-	}, nil)
+	}, nil, nil)
 
 	// 3. Test Cases.
 	tests := []struct {
@@ -280,7 +280,7 @@ func TestIPv4OnlyARPALocalAnswering(t *testing.T) {
 			returnIPv4Addresses: false,
 			returnIPv6Addresses: false,
 		},
-	}, nil)
+	}, nil, nil)
 
 	// Test case 1: AAAA query on catch-all zone with prefix
 	{
@@ -346,7 +346,7 @@ func TestIPv4OnlyARPALocalAnswering(t *testing.T) {
 			returnIPv4Addresses: false,
 			returnIPv6Addresses: false,
 		},
-	}, nil)
+	}, nil, nil)
 
 	{
 		req := new(dns.Msg)
@@ -458,7 +458,7 @@ func TestDNS64NonINQClassAndSyntheticTTL(t *testing.T) {
 			returnIPv4Addresses: false,
 			returnIPv6Addresses: false,
 		},
-	}, nil)
+	}, nil, nil)
 
 	// Test 1: non-IN Qclass pass-through
 	t.Run("Non-IN Qclass pass-through", func(t *testing.T) {
@@ -554,7 +554,7 @@ func newTestProxy(serverAddr string) *proxy {
 			returnIPv4Addresses: false,
 			returnIPv6Addresses: false,
 		},
-	}, nil)
+	}, nil, nil)
 	return p
 }
 
@@ -794,7 +794,7 @@ func TestDNS64CNAMEChainPreservationAndOwnerName(t *testing.T) {
 			returnIPv4Addresses: false,
 			returnIPv6Addresses: false,
 		},
-	}, nil)
+	}, nil, nil)
 
 	req := new(dns.Msg)
 	req.SetQuestion("alias.example.com.", dns.TypeAAAA)

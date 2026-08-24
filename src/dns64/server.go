@@ -110,7 +110,8 @@ func NewService(cfg config.DNS64Config, allowedSources []string, ignoredDstSubne
 		cache: newCache(expDur, purgeDur, cfg.MaxCacheEntries),
 		ns:    ns,
 	}
-	p.reload(cfg.Default, ia, buildZones(cfg.Zones), config.ParseIPNets(ignoredDstSubnets))
+	excludedAAAA := config.ParseIPNets(cfg.ExcludedAAAASubnets)
+	p.reload(cfg.Default, ia, buildZones(cfg.Zones), config.ParseIPNets(ignoredDstSubnets), excludedAAAA)
 
 	allowed := config.ParseAllowedNets(allowedSources)
 	s := &Service{
@@ -139,7 +140,8 @@ func (s *Service) Reload(cfg config.DNS64Config, allowedSources []string, ignore
 	}
 	allowed := config.ParseAllowedNets(allowedSources)
 	s.allowedNets.Store(&allowed)
-	s.proxy.reload(cfg.Default, ia, buildZones(cfg.Zones), config.ParseIPNets(ignoredDstSubnets))
+	excludedAAAA := config.ParseIPNets(cfg.ExcludedAAAASubnets)
+	s.proxy.reload(cfg.Default, ia, buildZones(cfg.Zones), config.ParseIPNets(ignoredDstSubnets), excludedAAAA)
 	s.proxy.cache.Reload(time.Duration(cfg.CacheExp)*time.Second, time.Duration(cfg.CachePurge)*time.Second, cfg.MaxCacheEntries)
 	s.rateLimit.update(cfg.RateLimit)
 	return nil
