@@ -79,8 +79,10 @@ An **empty `AllowedSources`** is accepted but denies every client: NAT64 and
 DNS64 log a loud warning at startup and silently drop all traffic. If clients
 get no answers at all, check `AllowedSources` first. Forwarders
 (`Dns64Default`, zone `forwarder`) must be in `host:port` form with a numeric
-port, `Nat64Pool` must be a `/96`, and zone `prefix` values must be `/96`
-networks (last four bytes zero) — misformatted values are rejected at startup
+port. `Nat64Pool` must be an RFC 6052 §2.2 prefix — `/96` (the derived
+default) or one of `/32`, `/40`, `/48`, `/56`, `/64`. Zone `prefix` values
+are bare `/96` networks (last four bytes zero) or carry an explicit `/n`
+length — addresses with dirty u-octet/suffix bits are rejected at startup
 instead of misbehaving silently.
 
 ## 3. Run

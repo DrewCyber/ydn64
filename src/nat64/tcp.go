@@ -181,13 +181,18 @@ func (s *Service) handleTCP(req *tcp.ForwarderRequest, logger *log.Logger) {
 		return
 	}
 
-	// Extract embedded IPv4 from the last 4 bytes of the pool6 destination.
-	ipv4 := net.IP(dstSlice[12:16])
-	if s.isIgnoredDst(ipv4) {
+	// Extract embedded IPv4 per the RFC 6052 §2.2 layout (length-aware;
+	// non-canonical addresses — dirty u octet or suffix — are refused).
+	ipv4, ok := s.pref64.Extract(dstIP)
+	if !ok {
 		req.Complete(true)
 		return
 	}
-	dstAddr := net.JoinHostPort(ipv4.String(), strconv.Itoa(int(id.LocalPort)))
+	if s.isIgnoredDst(net.IP(ipv4[:])) {
+		req.Complete(true)
+		return
+	}
+	dstAddr := net.JoinHostPort(net.IP(ipv4[:]).String(), strconv.Itoa(int(id.LocalPort)))
 
 	// Shed, don't queue: when a limit is reached, refuse the new flow
 	// immediately (Complete(true) aborts the handshake → RST) instead of

@@ -12,6 +12,16 @@ import (
 	"github.com/miekg/dns"
 )
 
+// testPref64 returns the Well-Known-Prefix-shaped /96 Pref64 used by the
+// proxy tests.
+func testPref64() *config.Pref64 {
+	p, err := config.ParsePref64Addr("64:ff9b::")
+	if err != nil {
+		panic(err)
+	}
+	return p
+}
+
 func TestDNS64IgnoredDstSubnets(t *testing.T) {
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -65,7 +75,7 @@ func TestDNS64IgnoredDstSubnets(t *testing.T) {
 		cache: newCache(300*time.Second, 600*time.Second, 0),
 	}
 
-	prefix := net.ParseIP("64:ff9b::")
+	prefix := testPref64()
 	ignoredNets := config.ParseIPNets([]string{"10.0.0.0/8", "127.0.0.0/8"})
 
 	p.reload(serverAddr, IAIgnore, []zone{
@@ -171,7 +181,7 @@ func TestDNS64ErrorRcodeHandling(t *testing.T) {
 		cache: newCache(300*time.Second, 600*time.Second, 0),
 	}
 
-	prefix := net.ParseIP("64:ff9b::")
+	prefix := testPref64()
 	if prefix == nil {
 		t.Fatal("failed to parse prefix")
 	}
@@ -257,7 +267,7 @@ func TestIPv4OnlyARPALocalAnswering(t *testing.T) {
 		cache: newCache(300*time.Second, 600*time.Second, 0),
 	}
 
-	prefix := net.ParseIP("64:ff9b::")
+	prefix := testPref64()
 	if prefix == nil {
 		t.Fatal("failed to parse prefix")
 	}
@@ -440,7 +450,7 @@ func TestDNS64NonINQClassAndSyntheticTTL(t *testing.T) {
 		cache: newCache(300*time.Second, 600*time.Second, 0),
 	}
 
-	prefix := net.ParseIP("64:ff9b::")
+	prefix := testPref64()
 	p.reload(serverAddr, IAIgnore, []zone{
 		{
 			domains:             []string{"."},
@@ -533,7 +543,7 @@ func newTestProxy(serverAddr string) *proxy {
 	p := &proxy{
 		cache: newCache(300*time.Second, 600*time.Second, 0),
 	}
-	prefix := net.ParseIP("64:ff9b::")
+	prefix := testPref64()
 	if prefix == nil {
 		panic("failed to parse prefix")
 	}
@@ -776,7 +786,7 @@ func TestDNS64CNAMEChainPreservationAndOwnerName(t *testing.T) {
 		cache: newCache(300*time.Second, 600*time.Second, 0),
 	}
 
-	prefix := net.ParseIP("64:ff9b::")
+	prefix := testPref64()
 	p.reload(serverAddr, IAIgnore, []zone{
 		{
 			domains:             []string{"."},

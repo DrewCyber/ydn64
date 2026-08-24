@@ -4,9 +4,9 @@ ydn64 — RFC REFERENCE LIST
 Authoritative list of the RFCs that ydn64's NAT64 and DNS64 implementations
 are measured against, with current implementation status.
 
-Last reviewed: 2026-08-24 (ICMP error translation landed; the detailed
-2026-07-25 section-by-section assessment was merged into this file and
-deleted — this file is the single source of truth for RFC status)
+Last reviewed: 2026-08-24 (TCP idle expiry per RFC 5382 REQ-5, UDP
+Endpoint-Independent Mapping per RFC 4787 REQ-1 / RFC 6146 §3.1/§5.2,
+and full RFC 6052 §2.2 prefix formats landed in one session)
 Documented deviations: README.md, "Standards conformance and deliberate deviations"
 
 DESIGN GOAL: ydn64 aims to work well for Yggdrasil clients, NOT to be a
@@ -103,15 +103,16 @@ RFC 6147 — DNS64: DNS Extensions for NAT from IPv6 Clients to IPv4 Servers
       - §5.3.1       PTR strategy (resolves in-addr.arpa directly
                      rather than either specified option)        [DEVIATION]
 
-RFC 6052 — IPv6 Addressing of IPv4/IPv6 Translators                [PARTIAL]
-    Address embedding for both NAT64 and DNS64. ydn64 implements the /96
-    case only; §2.2's /32, /40, /48, /56 and /64 formats are unimplemented
-    (the offsets are hardcoded to byte 12). The full algorithm is small:
-    CoreDNS's dns64 plugin to6() is a readable reference (handles the u-byte
-    skip at byte 8; validate n%8==0, 32<=n<=96). ydn64 derives its Network-
-    Specific Prefix from the node's own Yggdrasil /64, which satisfies
-    §3.2's "own address space" requirement. The Well-Known Prefix
-    64:ff9b::/96 is not supported as a fallback.
+RFC 6052 — IPv6 Addressing of IPv4/IPv6 Translators                 [DONE]
+    Address embedding for both NAT64 and DNS64. All §2.2 formats are
+    implemented via a shared length-aware helper (config.Pref64): /32,
+    /40, /48, /56, /64 and /96, including the u-octet-at-byte-8 rule
+    (split-octet layouts for /40-/56), zero-u/zero-suffix canonical-form
+    enforcement on extraction, and per-zone prefix selection in DNS64
+    (a zone prefix may differ from Nat64Pool). ydn64 derives its Network-
+    Specific Prefix from the node's own Yggdrasil /64 as a /96, which
+    satisfies §3.2's "own address space" requirement. The Well-Known
+    Prefix 64:ff9b::/96 is not configured by default but works if set.
 
 RFC 7915 — IP/ICMP Translation Algorithm                               [PARTIAL]
     Obsoletes RFC 6145. ydn64 does not translate packet headers — it

@@ -187,8 +187,10 @@ func (s *Service) handleEchoRequest(msg []byte, srcAddr, pool6Src [16]byte) bool
 	data := make([]byte, len(msg)-8)
 	copy(data, msg[8:])
 
-	var dstIPv4 [4]byte
-	copy(dstIPv4[:], pool6Src[12:]) // embedded IPv4 from the pool6 destination
+	dstIPv4, ok := s.pref64.Extract(net.IP(pool6Src[:]))
+	if !ok {
+		return true // consumed (dropped): non-canonical pool6 destination
+	}
 
 	sess := s.registerICMPSession(srcAddr, pool6Src, dstIPv4, id)
 	if sess == nil {

@@ -583,17 +583,10 @@ func (p *proxy) reversePTR(ptrName string) (net.IP, bool) {
 		if z.prefix == nil {
 			continue
 		}
-		pfx := z.prefix.To16()
-		// The prefix occupies the first 12 bytes; the last 4 are the IPv4.
-		match := true
-		for i := 0; i < 12; i++ {
-			if ip6[i] != pfx[i] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return net.IP(ip6[12:16]), true
+		// Length-aware extraction per the zone's RFC 6052 layout; Extract
+		// also refuses non-canonical addresses (dirty u octet/suffix).
+		if v4, ok := z.prefix.Extract(ip6); ok {
+			return net.IP(v4[:]), true
 		}
 	}
 	return nil, false

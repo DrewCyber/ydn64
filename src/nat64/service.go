@@ -48,6 +48,10 @@ var _ NetStack = (*netstack.YggdrasilNetstack)(nil)
 //	       (TCP/UDP are unaffected).
 type Service struct {
 	pool6Net *net.IPNet
+	// pref64 carries the RFC 6052 §2.2 layout (prefix length + embedded-IPv4
+	// octet offsets) derived from pool6Net; every extract/embed site goes
+	// through it instead of hard-coding the /96 byte-12 offset.
+	pref64   *config.Pref64
 	settings atomic.Pointer[nat64Settings]
 
 	ns       NetStack
@@ -139,9 +143,14 @@ func NewService(cfg config.NAT64Config, allowedSources []string, ignoredDstSubne
 	if err != nil {
 		return nil, fmt.Errorf("nat64: invalid pool6 %q: %w", cfg.Pool6, err)
 	}
+	pref64, err := config.ParsePref64(cfg.Pool6)
+	if err != nil {
+		return nil, fmt.Errorf("nat64: invalid pool6 %q: %w", cfg.Pool6, err)
+	}
 
 	s := &Service{
 		pool6Net:  pool6Net,
+		pref64:    pref64,
 		ns:        ns,
 		srcCounts: newSrcTracker(),
 		reasm:     newReasmTable(),

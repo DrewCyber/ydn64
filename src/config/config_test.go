@@ -90,16 +90,24 @@ func nat64Base() AppConfig {
 	}
 }
 
-func TestValidateNat64PoolMustBeSlash96(t *testing.T) {
+func TestValidateNat64PoolPrefixFormats(t *testing.T) {
 	tests := []struct {
 		pool   string
 		wantOK bool
 	}{
-		{"300:1:2:3::/96", true},
-		{"301:ca27:1d6e:6d2f::/96", true},
-		{"300:1:2:3::/64", false},  // everything downstream assumes /96
-		{"300:1:2:3::/128", false}, // no room for embedded IPv4
-		{"10.0.0.0/8", false},      // not even IPv6
+		{"300:1:2:3::/96", true},          // classic ydn64 derived form
+		{"301:ca27:1d6e:6d2f::/96", true}, // another canonical /96
+		{"64:ff9b::/96", true},            // RFC 6052 Well-Known Prefix shape
+		{"2001:db8::/32", true},           // RFC 6052 §2.2 variable lengths
+		{"2001:db8:1::/40", true},
+		{"2001:db8:1:2::/48", true},
+		{"2001:db8:1:2:3::/56", true},
+		{"2001:db8::/64", true},
+		{"300:1:2:3::/24", false},           // not an RFC 6052 length
+		{"300:1:2:3::/128", false},          // no room for embedded IPv4
+		{"10.0.0.0/8", false},               // not even IPv6
+		{"300:1:2:3::1/64", false},          // dirty suffix bits
+		{"300:1:2:3::c000:201:0/32", false}, // dirty u octet (byte 8)
 	}
 	for _, tc := range tests {
 		cfg := nat64Base()
@@ -110,9 +118,11 @@ func TestValidateNat64PoolMustBeSlash96(t *testing.T) {
 		}
 		if !tc.wantOK {
 			if err == nil {
-				t.Errorf("Validate(pool=%q) = nil, want /96 rejection", tc.pool)
-			} else if !strings.Contains(err.Error(), "/96") {
-				t.Errorf("Validate(pool=%q) error = %v, want it to mention /96", tc.pool, err)
+				t.Errorf("Validate(pool=%q) = nil, want rejection", tc.pool)
+			} else if !strings.Contains(err.Error(), "RFC 6052") &&
+				!strings.Contains(err.Error(), "non-zero bits") &&
+				!strings.Contains(err.Error(), "IPv6") {
+				t.Errorf("Validate(pool=%q) error = %v, want it to mention RFC 6052, dirty bits, or IPv6", tc.pool, err)
 			}
 		}
 	}

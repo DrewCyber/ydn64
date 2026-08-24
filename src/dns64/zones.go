@@ -36,9 +36,9 @@ func parseIA(s string) (InvalidAddress, error) {
 
 // zone is the resolved, ready-to-use form of config.ZoneConfig.
 type zone struct {
-	domains             []string // already lower-cased
-	forwarder           string   // empty → use default
-	prefix              net.IP   // nil → no NAT64 synthesis
+	domains             []string       // already lower-cased
+	forwarder           string         // empty → use default
+	prefix              *config.Pref64 // nil → no NAT64 synthesis
 	returnIPv4Addresses bool
 	returnIPv6Addresses bool
 }
@@ -48,9 +48,11 @@ type zone struct {
 func buildZones(cfgZones []config.ZoneConfig) []zone {
 	out := make([]zone, 0, len(cfgZones))
 	for _, z := range cfgZones {
-		var prefix net.IP
+		var prefix *config.Pref64
 		if z.Prefix != "" {
-			prefix = net.ParseIP(z.Prefix)
+			// Validation guarantees this parses; surface a nil-safe fallback
+			// rather than a half-configured zone if it ever doesn't.
+			prefix, _ = config.ParsePref64Addr(z.Prefix)
 		}
 		domains := make([]string, len(z.Domains))
 		for j, d := range z.Domains {
@@ -101,11 +103,11 @@ func matchZone(zones []zone, fqdn string) *zone {
 	return defaultZone // may be nil if no catch-all
 }
 
-// makeSynthesisedAAAA embeds ipv4 into prefix to create a NAT64 AAAA address.
-// prefix must be a 16-byte IPv6 address; the last 4 bytes are replaced by ipv4.
-func makeSynthesisedAAAA(prefix, ipv4 net.IP) net.IP {
-	result := make(net.IP, net.IPv6len)
-	copy(result, prefix.To16())
-	copy(result[12:], ipv4.To4())
-	return result
+// makeSynthesisedAAAA embeds ipv4 into the zone's RFC 6052 prefix to create
+// a NAT64 AAAA address (u octet and suffix left zero).
+func makeSynthesisedAAAA(prefix *config.Pref64, ipv4 net.IP) net.IP {
+	if prefix == nil {
+		return nil
+	}
+	return prefix.Embed(ipv4)
 }

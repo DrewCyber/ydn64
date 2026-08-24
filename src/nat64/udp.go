@@ -169,9 +169,14 @@ func (s *Service) parseUDPFlow(id stack.TransportEndpointID) (udpFlow, bool) {
 	}
 	copy(flow.pool6Src[:], dstSlice)
 
-	// Embedded IPv4 = last 4 bytes of the pool6 destination.
-	copy(flow.key.dstAddr[:], dstSlice[12:16])
-	if s.isIgnoredDst(net.IP(flow.key.dstAddr[:])) {
+	// Embedded IPv4 per the RFC 6052 §2.2 layout (length-aware; addresses
+	// with a dirty u octet or suffix are refused as not-in-pool).
+	dstV4, ok := s.pref64.Extract(net.IP(dstSlice))
+	if !ok {
+		return udpFlow{}, false
+	}
+	flow.key.dstAddr = dstV4
+	if s.isIgnoredDst(net.IP(dstV4[:])) {
 		return udpFlow{}, false
 	}
 	return flow, true

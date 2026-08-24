@@ -304,12 +304,11 @@ func (r *errRateLimiter) allow(now time.Time) bool {
 	return true
 }
 
-// pool6AddrFor maps an IPv4 address into the NAT64 pool prefix (RFC 6052
-// /96 embedding: the address occupies the last four bytes verbatim).
+// pool6AddrFor maps an IPv4 address into the NAT64 pool prefix per the
+// configured RFC 6052 §2.2 layout (u octet and suffix left zero).
 func (s *Service) pool6AddrFor(v4 [4]byte) [16]byte {
 	var out [16]byte
-	copy(out[:], s.pool6Net.IP.To16())
-	copy(out[12:], v4[:])
+	copy(out[:], s.pref64.Embed(net.IP(v4[:])).To16())
 	return out
 }
 

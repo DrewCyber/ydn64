@@ -247,16 +247,12 @@ func (c *AppConfig) Validate() error {
 		if c.Nat64Pool == "" {
 			return fmt.Errorf("Nat64Pool is required when Nat64Enable = true")
 		}
-		_, ipnet, err := net.ParseCIDR(c.Nat64Pool)
-		if err != nil {
-			return fmt.Errorf("Nat64Pool %q is not a valid CIDR: %w", c.Nat64Pool, err)
-		}
-		// Everything downstream hard-codes the well-known prefix format:
-		// embedded-v4 extraction at byte 12, AAAA synthesis and PTR
-		// generation all assume exactly 96 prefix bits. A hand-edited /64
-		// would misbehave silently, so reject anything else up front.
-		if ones, _ := ipnet.Mask.Size(); ones != 96 {
-			return fmt.Errorf("Nat64Pool %q must be a /96 prefix (got /%d); variable-length RFC 6052 prefixes are not supported", c.Nat64Pool, ones)
+		// Everything downstream extracts the embedded IPv4 through the
+		// RFC 6052 §2.2 layout, which supports /32, /40, /48, /56, /64 and
+		// /96 prefixes (ParsePref64 also rejects dirty u-octet/suffix bits,
+		// which would make the mapping ambiguous).
+		if _, err := ParsePref64(c.Nat64Pool); err != nil {
+			return fmt.Errorf("Nat64Pool %q: %w", c.Nat64Pool, err)
 		}
 		if c.Nat64UdpTimeout <= 0 {
 			c.Nat64UdpTimeout = 300
@@ -319,19 +315,12 @@ func (c *AppConfig) Validate() error {
 				return fmt.Errorf("Dns64Zones[%d]: \"domains\" list is required", i)
 			}
 			if zone.Prefix != "" {
-				ip := net.ParseIP(zone.Prefix)
-				switch {
-				case ip == nil:
-					return fmt.Errorf("Dns64Zones[%d]: \"prefix\" %q is not a valid IPv6 address", i, zone.Prefix)
-				case ip.To4() != nil:
-					return fmt.Errorf("Dns64Zones[%d]: \"prefix\" %q must be an IPv6 address", i, zone.Prefix)
-				}
-				// Synthesis overwrites the last four bytes with the embedded
-				// IPv4 address (and PTR matching compares the first twelve),
-				// so a prefix with any of those bits set would silently
-				// produce garbage — require a true /96 network up front.
-				if p := ip.To16(); !bytes.Equal(p[12:], make([]byte, 4)) {
-					return fmt.Errorf("Dns64Zones[%d]: \"prefix\" %q must be a /96 network (its last four bytes must be zero)", i, zone.Prefix)
+				// Bare addresses mean the classic /96 form (last four
+				// bytes zero); an explicit "/n" selects one of the other
+				// RFC 6052 §2.2 formats. ParsePref64Addr rejects dirty
+				// u-octet/suffix bits either way.
+				if _, err := ParsePref64Addr(zone.Prefix); err != nil {
+					return fmt.Errorf("Dns64Zones[%d]: \"prefix\" %q: %v", i, zone.Prefix, err)
 				}
 			}
 			if zone.Forwarder != "" {
