@@ -1,15 +1,12 @@
 If we don't have any dns64 section with "." domain filter and request is not matched to any filters we should return NXDOMAIN.
-If we have "200::/7" as AAAA dns response, we just return it as a response without any modifications.
+
+WRONG: If we have "200::/7" as AAAA dns response, we just return it as a response without any modifications.
+CORRECT: Consider "200::/7" AAAA dns responses as regular IPV6 response. And we will bypath that if return-public-ipv6 = true
+
 
 Additional for the main yggdrasil config sections below:
 
 ```
-[dns64]                             # separate section for dns64
-enable = true                       # true by default
-listen: "[200:c771:1561:ed81::1]:53"    # The address and port to bind to. By default yggdrasil node ip here
-default: 8.8.8.8:53                 # (mandatory) default forwarder for the requests
-cache_expiration: 300               # expire dns cache in 300 sec
-cache_purge: 600                    # purge dns cache in 600 sec
 invalid-address: ignore             # What to do with an "0.0.0.0" and [::] addresses
 #   "ignore"  - treated like a regular address (i.e. 0.0.0.0 return as [prefix::], [::] - drop)
 #               default behavior.
