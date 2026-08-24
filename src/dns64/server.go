@@ -73,6 +73,9 @@ type Service struct {
 	ns          *netstack.YggdrasilNetstack
 	// lastDenyReply rate-limits REFUSED answers to denied sources.
 	lastDenyReply atomic.Int64
+	// rateLimit enforces Dns64RateLimit per source (RFC 5358); nil or
+	// zero-rate means unlimited. Reloadable.
+	rateLimit *srcRateLimiter
 	// wg tracks in-flight query work for graceful drain (see Drain).
 	wg sync.WaitGroup
 	// querySem bounds concurrent in-flight queries (UDP query goroutines +
@@ -104,6 +107,7 @@ func NewService(cfg config.DNS64Config, allowedSources []string, ignoredDstSubne
 		proxy:      p,
 		listenAddr: cfg.Listen,
 		ns:         ns,
+		rateLimit:  newSrcRateLimiter(cfg.RateLimit),
 	}
 	if cfg.MaxQueries > 0 {
 		s.querySem = make(chan struct{}, cfg.MaxQueries)
@@ -113,10 +117,11 @@ func NewService(cfg config.DNS64Config, allowedSources []string, ignoredDstSubne
 }
 
 // Reload atomically replaces AllowedSources, IgnoredDstSubnets, the DNS64 zone table/default
-// forwarder/InvalidAddress policy, and the cache's expiration/purge
-// intervals, e.g. in response to a SIGHUP-triggered config reload. Safe to
-// call concurrently with in-flight queries. Dns64Listen and Dns64Enable are
-// not reloadable and require a process restart to change.
+// forwarder/InvalidAddress policy, the cache's expiration/purge intervals,
+// and the per-source query rate limit (RFC 5358), e.g. in response to a
+// SIGHUP-triggered config reload. Safe to call concurrently with in-flight
+// queries. Dns64Listen and Dns64Enable are not reloadable and require a
+// process restart to change.
 func (s *Service) Reload(cfg config.DNS64Config, allowedSources []string, ignoredDstSubnets []string) error {
 	ia, err := parseIA(cfg.InvalidAddress)
 	if err != nil {
@@ -126,6 +131,7 @@ func (s *Service) Reload(cfg config.DNS64Config, allowedSources []string, ignore
 	s.allowedNets.Store(&allowed)
 	s.proxy.reload(cfg.Default, ia, buildZones(cfg.Zones), config.ParseIPNets(ignoredDstSubnets))
 	s.proxy.cache.Reload(time.Duration(cfg.CacheExp)*time.Second, time.Duration(cfg.CachePurge)*time.Second, cfg.MaxCacheEntries)
+	s.rateLimit.update(cfg.RateLimit)
 	return nil
 }
 
@@ -335,6 +341,17 @@ func (s *Service) serveUDP(conn *gonet.UDPConn, logger *log.Logger) {
 			s.maybeRefuseDenied(conn, addr, buf[:n])
 			continue
 		}
+
+		// Per-source rate limit (RFC 5358). Over-budget queries get the same
+		// spaced REFUSED treatment as denied sources — replying 1:1 to the
+		// real source amplifies nothing.
+		var srcKey [16]byte
+		copy(srcKey[:], srcIP.To16())
+		if !s.rateLimit.allow(srcKey, time.Now()) {
+			logger.Debugf("DNS64: rate-limited query from %s (over Dns64RateLimit)", addr)
+			s.maybeRefuseDenied(conn, addr, buf[:n])
+			continue
+		}
 		logger.Debugf("DNS64: query from %s (%d bytes)", addr, n)
 
 		pkt := make([]byte, n)
@@ -428,7 +445,9 @@ func (s *Service) serveTCP(listener *gonet.TCPListener, logger *log.Logger) {
 
 // serveTCPConn serves queries for a single DNS-over-TCP connection one at a
 // time (RFC 7766 permits, but does not require, pipelining), closing the
-// connection once dnsTCPIdleTimeout elapses without a new query.
+// connection once dnsTCPIdleTimeout elapses without a new query. Each query
+// consumes a per-source rate token; an over-budget source's connection is
+// closed so it cannot hold its concurrency slot while hammering upstream.
 func (s *Service) serveTCPConn(conn net.Conn, logger *log.Logger) {
 	defer conn.Close()
 	dc := &dns.Conn{Conn: conn}
@@ -436,6 +455,14 @@ func (s *Service) serveTCPConn(conn net.Conn, logger *log.Logger) {
 		_ = conn.SetReadDeadline(time.Now().Add(dnsTCPIdleTimeout))
 		req, err := dc.ReadMsg()
 		if err != nil {
+			return
+		}
+		var srcKey [16]byte
+		if tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
+			copy(srcKey[:], tcpAddr.IP.To16())
+		}
+		if !s.rateLimit.allow(srcKey, time.Now()) {
+			logger.Debugf("DNS64: rate-limited TCP connection from %s (over Dns64RateLimit); closing", conn.RemoteAddr())
 			return
 		}
 		logger.Debugf("DNS64: TCP query from %s", conn.RemoteAddr())

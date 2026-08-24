@@ -135,10 +135,10 @@ func parseSynthICMPv6Error(t *testing.T, pkt []byte) icmpv6ErrorParts {
 // that ydn64 implements, including the silent-drop classes.
 func TestRFC7915TranslateErrorTypeTable(t *testing.T) {
 	cases := []struct {
-		typ, code       byte
-		wantType        byte
-		wantCode        byte
-		wantOK          bool
+		typ, code byte
+		wantType  byte
+		wantCode  byte
+		wantOK    bool
 	}{
 		{3, 0, 1, 0, true},
 		{3, 1, 1, 0, true},
@@ -245,17 +245,17 @@ func TestRFC7915InnerPacketParsing(t *testing.T) {
 
 	bad := [][]byte{
 		nil,
-		make([]byte, 19),                    // shorter than a fixed header
-		append([]byte{0x60}, good[1:]...),   // not IPv4
-		append([]byte{0x41}, good[1:]...),   // IHL claims 4 bytes
-		append([]byte{0x4f}, good[1:]...),   // IHL 60 > available bytes
-		func() []byte {                      // unknown protocol
+		make([]byte, 19),                  // shorter than a fixed header
+		append([]byte{0x60}, good[1:]...), // not IPv4
+		append([]byte{0x41}, good[1:]...), // IHL claims 4 bytes
+		append([]byte{0x4f}, good[1:]...), // IHL 60 > available bytes
+		func() []byte { // unknown protocol
 			q := append([]byte{}, good...)
 			q[9] = 47
 			return q
 		}(),
-		good[:27],                           // fewer than 8 L4 bytes
-		func() []byte {                      // total length field smaller than IHL
+		good[:27], // fewer than 8 L4 bytes
+		func() []byte { // total length field smaller than IHL
 			q := append([]byte{}, good...)
 			binary.BigEndian.PutUint16(q[2:4], 4)
 			return q
@@ -559,7 +559,7 @@ func TestUDPPortRefusedSynthesisShape(t *testing.T) {
 	if p.typ != 1 || p.code != 4 {
 		t.Fatalf("type/code = %d/%d, want 1/4 (port unreachable)", p.typ, p.code)
 	}
-	if !p.outerSrc.Equal(net.ParseIP("300:1:2:3::"+testServerV4)) {
+	if !p.outerSrc.Equal(net.ParseIP("300:1:2:3::" + testServerV4)) {
 		t.Errorf("outer source = %v, want pool-mapped server", p.outerSrc)
 	}
 	if got := binary.BigEndian.Uint16(p.innerL4[0:2]); got != 40000 {
@@ -615,9 +615,9 @@ func TestDialErrorToUnreachableMapping(t *testing.T) {
 		return &net.OpError{Op: "dial", Err: errno}
 	}
 	cases := []struct {
-		err       error
-		wantType  byte
-		wantCode  byte
+		err      error
+		wantType byte
+		wantCode byte
 	}{
 		{syscallErr(syscall.EACCES), 1, 1},
 		{syscallErr(syscall.ENETUNREACH), 1, 0},

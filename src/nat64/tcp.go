@@ -99,20 +99,31 @@ func (s *Service) handleTCP(req *tcp.ForwarderRequest, logger *log.Logger) {
 	}
 	dstAddr := net.JoinHostPort(ipv4.String(), strconv.Itoa(int(id.LocalPort)))
 
-	// Shed, don't queue: when the connection limit is reached, refuse the
-	// new flow immediately (Complete(true) aborts the handshake → RST)
-	// instead of letting unbounded proxy goroutines pile up.
+	// Shed, don't queue: when a limit is reached, refuse the new flow
+	// immediately (Complete(true) aborts the handshake → RST) instead of
+	// letting unbounded proxy goroutines pile up. The per-source ceiling
+	// (RFC 6146 §5.3) is checked first so one peer cannot consume the
+	// global pool; unlike UDP, TCP accounting is synchronous end-to-end.
+	var srcKey [16]byte
+	copy(srcKey[:], srcIP.To16())
+	if l := s.perSrcTCPLimit(); l > 0 && s.srcCounts.count(srcKey, srcTCP) >= l {
+		logger.Debugf("NAT64 TCP shedding %s → %s (per-source connection limit %d)", srcIP, dstAddr, l)
+		req.Complete(true)
+		return
+	}
 	if !s.tryAcquireTCP() {
 		logger.Debugf("NAT64 TCP shedding %s → %s (connection limit)", srcIP, dstAddr)
 		req.Complete(true)
 		return
 	}
+	s.srcCounts.add(srcKey, srcTCP)
 
 	// CreateEndpoint completes the three-way handshake synchronously.
 	var wq waiter.Queue
 	ep, tcpErr := req.CreateEndpoint(&wq)
 	if tcpErr != nil {
 		s.releaseTCP()
+		s.srcCounts.remove(srcKey, srcTCP)
 		req.Complete(true)
 		return
 	}
@@ -127,6 +138,7 @@ func (s *Service) handleTCP(req *tcp.ForwarderRequest, logger *log.Logger) {
 	s.drainWG.Add(1)
 	go func() {
 		defer s.drainWG.Done()
+		defer s.srcCounts.remove(srcKey, srcTCP)
 		defer s.releaseTCP()
 		defer yggConn.Close()
 

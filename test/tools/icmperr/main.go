@@ -137,7 +137,7 @@ func checksum(b []byte) uint16 {
 		sum += uint32(b[len(b)-1]) << 8
 	}
 	for sum > 0xffff {
-		sum = (sum >> 16) + (sum&0xffff)
+		sum = (sum >> 16) + (sum & 0xffff)
 	}
 	return ^uint16(sum)
 }

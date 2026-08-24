@@ -425,7 +425,7 @@ func (s *Service) translateEchoQuotedError(srcV4 [4]byte, inner icmpInnerPacket,
 
 	seq := binary.BigEndian.Uint16(inner.l4[6:8])
 	l4 := make([]byte, len(inner.l4))
-	l4[0], l4[1] = 128, 0 // Echo Request, as the client originally sent it
+	l4[0], l4[1] = 128, 0                              // Echo Request, as the client originally sent it
 	binary.BigEndian.PutUint16(l4[4:6], sess.clientID) // client identifier restored
 	binary.BigEndian.PutUint16(l4[6:8], seq)
 	copy(l4[8:], inner.l4[8:])

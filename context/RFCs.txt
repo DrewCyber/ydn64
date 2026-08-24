@@ -49,11 +49,13 @@ RFC 6146 — Stateful NAT64: Network Address and Protocol Translation from
                      repeat queries reuse their allocation, and the table
                      is capped (maxICMPSessions); idle timeout fixed at
                      60 s                                              [DONE]
-      - §5.3         resource limits / anti-DoS: no session caps or
-                     per-source quotas yet. Also a MAY worth a knob:
-                     udpReplyLoop refreshes lastSeen on every inbound v4
-                     datagram, exactly the keep-alive-attack behaviour the
-                     RFC warns about                                   [TODO]
+      - §5.3         resource limits / anti-DoS: global caps (Nat64Max*),
+                     per-source ceilings for UDP sessions and proxied TCP
+                     connections (Nat64MaxUDPSessionsPerSource /
+                     Nat64MaxTCPConnectionsPerSource), and outbound-only
+                     session-lifetime refresh (inbound v4 datagrams no
+                     longer pin sockets — the keep-alive behaviour this
+                     subsection warns about)                        [DONE]
       - §3.1 / §5.2  Binding Information Base -> Endpoint-Independent
                      Mapping (unblocks STUN/ICE/WebRTC)            [DEFERRED]
                      Design sketch for when this is picked up:
@@ -170,7 +172,9 @@ RFC 4787 (BCP 127) — NAT Behavioral Requirements for Unicast UDP   [PARTIAL]
     REQ-1 Endpoint-Independent Mapping                            [DEFERRED]
     REQ-3 port parity / range preservation                            [TODO]
     REQ-5 mapping timer >= 2 min, default >= 5 min
-         (default 300 s, Validate() floor 120 s)                      [DONE]
+         (default 300 s, Validate() floor 120 s); refreshed only by the
+         client's outbound datagrams per REQ-5's own rule — inbound v4
+         traffic never extends a mapping                            [DONE]
     REQ-6 configurable timers                                         [DONE]
     REQ-8 filtering behaviour (currently address-and-port-dependent,
           i.e. stricter than RECOMMENDED)                       [DEVIATION]
@@ -251,9 +255,12 @@ RFC 4033 / 4034 / 4035 — DNSSEC                                  [PARTIAL]
     DNS64 (vDNS64) is a much larger piece of work.                  [DEFERRED]
 
 RFC 5358 (BCP 140) — Preventing Use of Recursive Nameservers in
-                     Reflector Attacks                             [PARTIAL]
-    ydn64 is gated by AllowedSources but has no rate limiting or response
-    rate limiting.                                                    [TODO]
+                     Reflector Attacks                             [DONE]
+    ydn64 is gated by AllowedSources and additionally rate-limits queries
+    per source address (Dns64RateLimit, token bucket with a small burst,
+    SIGHUP-reloadable). Over-budget UDP queries are refused with strict
+    reply spacing — denials themselves cannot be amplified — and NAT64
+    per-source ceilings keep one peer from monopolising translator state.
 
 RFC 8482 — Providing Minimal-Sized Responses to DNS Queries that have
            QTYPE=ANY                                            [DEVIATION]

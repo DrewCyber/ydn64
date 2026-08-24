@@ -57,6 +57,9 @@ type Service struct {
 	// that exact entry is removed, so stale/superseded relay loops can never
 	// corrupt the count.
 	udpSessions atomic.Int64
+	// srcCounts tracks live UDP sessions and proxied TCP connections per
+	// client address for the per-source anti-abuse ceilings (RFC 6146 §5.3).
+	srcCounts srcTracker
 	// tcpSem bounds concurrently proxied NAT64 TCP connections. Sized at
 	// construction — Nat64MaxTCPConnections requires a restart to change.
 	tcpSem chan struct{}
@@ -109,6 +112,9 @@ type nat64Settings struct {
 	ignoredDstNets []*net.IPNet
 	udpTimeout     time.Duration
 	maxUDPSessions int64 // ≤0 = unlimited
+	// Per-source anti-abuse ceilings (RFC 6146 §5.3); ≤0 = unlimited.
+	maxUDPSessionsPerSrc int64
+	maxTCPClientsPerSrc  int64
 }
 
 // NewService creates a NAT64 Service from configuration.
@@ -121,39 +127,55 @@ func NewService(cfg config.NAT64Config, allowedSources []string, ignoredDstSubne
 	}
 
 	s := &Service{
-		pool6Net: pool6Net,
-		ns:       ns,
+		pool6Net:  pool6Net,
+		ns:        ns,
+		srcCounts: newSrcTracker(),
 	}
 	if cfg.MaxTCPClients > 0 {
 		s.tcpSem = make(chan struct{}, cfg.MaxTCPClients)
 	}
 	s.icmpNextID.Store(rand.Uint32()) // unpredictable starting point for NAT-assigned ICMP identifiers
 	s.settings.Store(&nat64Settings{
-		allowedNets:    config.ParseAllowedNets(allowedSources),
-		ignoredDstNets: config.ParseIPNets(ignoredDstSubnets),
-		udpTimeout:     time.Duration(cfg.UDPTimeout) * time.Second,
-		maxUDPSessions: int64(cfg.MaxUDPSessions),
+		allowedNets:          config.ParseAllowedNets(allowedSources),
+		ignoredDstNets:       config.ParseIPNets(ignoredDstSubnets),
+		udpTimeout:           time.Duration(cfg.UDPTimeout) * time.Second,
+		maxUDPSessions:       int64(cfg.MaxUDPSessions),
+		maxUDPSessionsPerSrc: int64(cfg.MaxUDPSessionsPerSrc),
+		maxTCPClientsPerSrc:  int64(cfg.MaxTCPConnectionsPerSrc),
 	})
 	return s, nil
 }
 
-// Reload atomically replaces AllowedSources, IgnoredDstSubnets, Nat64UdpTimeout
-// and Nat64MaxUDPSessions with new values, e.g. in response to a SIGHUP-triggered
-// config reload. Safe to call concurrently with in-flight traffic; other NAT64
-// settings (Nat64Pool, Nat64Enable, Nat64MaxTCPConnections) are not reloadable
-// and require a process restart to change.
+// Reload atomically replaces AllowedSources, IgnoredDstSubnets, Nat64UdpTimeout,
+// Nat64MaxUDPSessions and the per-source anti-abuse ceilings with new values,
+// e.g. in response to a SIGHUP-triggered config reload. Safe to call
+// concurrently with in-flight traffic; other NAT64 settings (Nat64Pool,
+// Nat64Enable, Nat64MaxTCPConnections) are not reloadable and require a
+// process restart to change.
 func (s *Service) Reload(cfg config.NAT64Config, allowedSources []string, ignoredDstSubnets []string) {
 	s.settings.Store(&nat64Settings{
-		allowedNets:    config.ParseAllowedNets(allowedSources),
-		ignoredDstNets: config.ParseIPNets(ignoredDstSubnets),
-		udpTimeout:     time.Duration(cfg.UDPTimeout) * time.Second,
-		maxUDPSessions: int64(cfg.MaxUDPSessions),
+		allowedNets:          config.ParseAllowedNets(allowedSources),
+		ignoredDstNets:       config.ParseIPNets(ignoredDstSubnets),
+		udpTimeout:           time.Duration(cfg.UDPTimeout) * time.Second,
+		maxUDPSessions:       int64(cfg.MaxUDPSessions),
+		maxUDPSessionsPerSrc: int64(cfg.MaxUDPSessionsPerSrc),
+		maxTCPClientsPerSrc:  int64(cfg.MaxTCPConnectionsPerSrc),
 	})
 }
 
 // udpTimeout returns the current NAT64 UDP session idle timeout.
 func (s *Service) udpTimeout() time.Duration {
 	return s.settings.Load().udpTimeout
+}
+
+// perSrcUDPLimit returns the per-client UDP session ceiling (≤0 = unlimited).
+func (s *Service) perSrcUDPLimit() int64 {
+	return s.settings.Load().maxUDPSessionsPerSrc
+}
+
+// perSrcTCPLimit returns the per-client proxied-TCP ceiling (≤0 = unlimited).
+func (s *Service) perSrcTCPLimit() int64 {
+	return s.settings.Load().maxTCPClientsPerSrc
 }
 
 // serviceLogger returns the log target captured at Start; nil before Start,

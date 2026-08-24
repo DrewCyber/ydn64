@@ -236,6 +236,12 @@ func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string, peers, allowed
 	sb.WriteString("  # least-recently-active session is evicted to make room.\n")
 	sb.WriteString("  Nat64MaxUDPSessions: 4096\n\n")
 
+	sb.WriteString("  # Per-client anti-abuse ceilings (RFC 6146 section 5.3): how many UDP\n")
+	sb.WriteString("  # sessions / proxied TCP connections a single source address may hold.\n")
+	sb.WriteString("  # Flows beyond these are shed immediately. Reloadable via SIGHUP.\n")
+	sb.WriteString("  Nat64MaxUDPSessionsPerSource: 256\n")
+	sb.WriteString("  Nat64MaxTCPConnectionsPerSource: 128\n\n")
+
 	sb.WriteString("  # Enable DNS64 service. If false, the DNS64 service will not be started.\n")
 	sb.WriteString("  Dns64Enable: true\n\n")
 
@@ -256,6 +262,12 @@ func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string, peers, allowed
 	sb.WriteString("  # answered with SERVFAIL immediately and excess TCP connections are\n")
 	sb.WriteString("  # closed. Applied at startup; changing it requires a restart.\n")
 	sb.WriteString("  Dns64MaxConcurrentQueries: 512\n\n")
+
+	sb.WriteString("  # Per-client DNS64 query rate limit in queries per second (RFC 5358:\n")
+	sb.WriteString("  # keep this resolver from being abused as a reflection/amplification\n")
+	sb.WriteString("  # engine). Short bursts above the rate are tolerated; sustained\n")
+	sb.WriteString("  # excess is refused. Reloadable via SIGHUP.\n")
+	sb.WriteString("  Dns64RateLimit: 50\n\n")
 
 	sb.WriteString("  # Dns64InvalidAddress: \"ignore\" | \"process\" | \"discard\"\n")
 	sb.WriteString("  # What to do with an \"0.0.0.0\" and [::] addresses\n")

@@ -12,6 +12,25 @@ moved under the corresponding version heading.
 
 ## [Unreleased]
 
+Anti-abuse hardening: per-source DNS64 rate limiting and NAT64 quotas
+(RFC 5358, RFC 6146 §5.3).
+
+- **RFC 5358 — per-source DNS64 rate limiting**: new `Dns64RateLimit` key
+  (default 50 queries/s per source, small burst allowance, reloadable via
+  SIGHUP). Over-budget UDP queries are REFUSED with strict reply spacing or
+  dropped; over-budget TCP connections are closed. A single allowed peer can
+  no longer drive the embedded resolver as a query engine.
+- **RFC 6146 §5.3 — NAT64 per-source ceilings**: `Nat64MaxUDPSessionsPerSource`
+  (default 256) and `Nat64MaxTCPConnectionsPerSource` (default 128) stop one
+  peer from occupying every translator slot. Both are SIGHUP-reloadable;
+  flows beyond the cap are shed before any state is created.
+- **Keep-alive-attack fix**: NAT64 UDP session lifetime is now refreshed only
+  by the client's own outbound datagrams (RFC 4787 REQ-5's rule). Inbound v4
+  replies no longer extend sessions, so pointing one datagram at a chatty
+  server cannot pin an outbound socket indefinitely.
+
+## [Unreleased]
+
 ICMP error translation: traceroute and PMTUD now work through NAT64.
 
 - **RFC 7915 §4.2/§4.3 + RFC 5508 REQ-3/REQ-4 — ICMPv4 error translation**.

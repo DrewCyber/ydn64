@@ -168,6 +168,14 @@ func (s *Service) handleUDPForward(req *udp.ForwarderRequest, logger *log.Logger
 	}
 
 	// Shed before creating any endpoint: an over-limit flow costs nothing.
+	// The per-source ceiling (RFC 6146 §5.3) is checked first so one peer
+	// cannot evict or exhaust the global pool; the count itself is registered
+	// only once a session tuple is actually stored (mirroring udpSessions),
+	// so the check can overshoot by the number of in-flight dials at worst.
+	if c := s.srcCounts.count(flow.key.srcAddr, srcUDP); s.perSrcUDPLimit() > 0 && c >= s.perSrcUDPLimit() {
+		logger.Debugf("NAT64 UDP shedding flow %v (per-source limit %d)", flow.key, s.perSrcUDPLimit())
+		return true
+	}
 	if !s.admitUDPSession() {
 		logger.Debugf("NAT64 UDP shedding flow %v (session limit)", flow.key)
 		return true
@@ -237,6 +245,7 @@ func (s *Service) handleUDPForward(req *udp.ForwarderRequest, logger *log.Logger
 			s.sessions.Store(flow.key, sess)
 		} else {
 			s.udpSessions.Add(1)
+			s.srcCounts.add(flow.key.srcAddr, srcUDP)
 		}
 		go s.udpReplyLoop(sess, flow.key)
 		go s.udpForwardLoop(sess, flow.key)
@@ -279,6 +288,12 @@ func (s *Service) udpForwardLoop(sess *udpSession, key sessionKey) {
 // included). Oversized replies that previously could not be sent at all now
 // arrive fragmented and reassemble correctly on the client.
 //
+// Inbound v4 traffic deliberately does NOT refresh lastSeen (RFC 6146 §5.3,
+// RFC 4787 REQ-5): refreshing on received datagrams lets an attacker pin a
+// session — and its outbound socket — forever by pointing one datagram at a
+// chatty server. Session lifetime is bounded by client-side activity
+// (udpForwardLoop) plus this loop's server-silence deadline.
+//
 // Like the forward loop, ECONNREFUSED on Read (the kernel's report of a v4
 // Port Unreachable) is translated into an ICMPv6 port-unreachable for the
 // client instead of tearing the session down.
@@ -299,11 +314,9 @@ func (s *Service) udpReplyLoop(sess *udpSession, key sessionKey) {
 			}
 			return // timeout or connection closed
 		}
-		atomic.StoreInt64(&sess.lastSeenNs, time.Now().UnixNano())
 		if _, err := sess.conn6.Write(buf[:n]); err != nil {
 			return
 		}
-		atomic.StoreInt64(&sess.lastSeenNs, time.Now().UnixNano())
 	}
 }
 
@@ -318,5 +331,6 @@ func (s *Service) deleteSession(sess *udpSession, key sessionKey) {
 	}
 	if s.sessions.CompareAndDelete(key, sess) {
 		s.udpSessions.Add(-1)
+		s.srcCounts.remove(key.srcAddr, srcUDP)
 	}
 }

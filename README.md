@@ -48,15 +48,26 @@ Everything else is configured with secure, working defaults out of the box.
 ### Resource limits
 
 Any allowed peer can generate unbounded load, so the services are bounded by
-default. All four keys accept any positive integer; unset or non-positive
-values fall back to these defaults:
+default. All keys accept any positive integer; unset or non-positive values
+fall back to these defaults:
 
 | Key | Default | Behaviour at the limit | Reloadable |
 |---|---|---|---|
 | `Nat64MaxTCPConnections` | 1024 | new connections refused (RST) | no — restart |
 | `Nat64MaxUDPSessions` | 4096 | least-recently-active session evicted | yes |
+| `Nat64MaxUDPSessionsPerSource` | 256 | that client's new UDP flows shed | yes |
+| `Nat64MaxTCPConnectionsPerSource` | 128 | that client's new connections refused (RST) | yes |
+| `Dns64RateLimit` | 50 qps/source | over-budget queries REFUSED (reply-rate-limited) | yes |
 | `Dns64MaxCacheEntries` | 4096 | expired entries purged, else random eviction | yes |
 | `Dns64MaxConcurrentQueries` | 512 | excess UDP queries → SERVFAIL, TCP conns closed | no — restart |
+
+The per-source ceilings and the DNS64 rate limit are anti-abuse controls
+(RFC 6146 §5.3, RFC 5358): they stop a single allowed peer from monopolising
+translator state or using the resolver as a query engine, while leaving
+generous headroom for busy legitimate clients. Related: NAT64 UDP session
+lifetime is refreshed only by the client's own outbound datagrams — replies
+from the IPv4 side never extend it, so an attacker cannot pin sockets by
+pointing one datagram at a chatty server.
 
 An **empty `AllowedSources`** is accepted but denies every client: NAT64 and
 DNS64 log a loud warning at startup and silently drop all traffic. If clients
