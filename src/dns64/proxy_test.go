@@ -339,11 +339,11 @@ func TestIPv4OnlyARPALocalAnswering(t *testing.T) {
 	}
 
 	// Test case 3: Zone with prefix == nil
-	// A zone with no prefix and no return flags is BLOCKED (context/
-	// dns64-parameters.txt "empty-zone" rule): it answers every query type
-	// with a local authoritative NXDOMAIN without contacting any forwarder —
-	// including locally intercepted names like ipv4only.arpa, which are only
-	// reachable through zones that can actually serve data.
+	// A zone with no prefix and no return flags is BLOCKED (the "empty-zone"
+	// rule, see README's "Local answers" section): it answers every query
+	// type with a local authoritative NXDOMAIN without contacting any
+	// forwarder — including locally intercepted names like ipv4only.arpa,
+	// which are only reachable through zones that can actually serve data.
 	p.reload("127.0.0.1:53", IAIgnore, []zone{
 		{
 			domains:             []string{"."},

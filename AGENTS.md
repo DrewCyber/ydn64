@@ -167,7 +167,6 @@ only the mechanics that matter when changing code:
   rationale, and why gVisor upgrades are blocked upstream.
 - [sighup-reload.md](context/sighup-reload.md) — design note for the SIGHUP
   live config reload path.
-- [dns64-parameters.txt](context/dns64-parameters.txt) — DNS64 parameter notes.
 - The consolidated code review of 2026-08-23 (formerly
   `context/code-review-2026-08-23.md`) is CLOSED and the file removed: every
   finding is fixed (git history documents each fix) except these deliberate

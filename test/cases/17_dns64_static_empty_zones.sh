@@ -1,6 +1,7 @@
 #!/bin/sh
-# Dns64Static local authoritative answers + blocked ("empty") zones
-# (context/dns64-parameters.txt zone semantics).
+# Dns64Static local authoritative answers + blocked ("empty") zones.
+# (Zone semantics originally specified in context/dns64-parameters.txt, now
+# documented in README's "Local answers" section.)
 #
 #   Dns64Static maps exact names to literal IPv4/IPv6 addresses served
 #   locally and authoritatively: A records for v4 values, AAAA records for
