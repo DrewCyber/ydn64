@@ -10,62 +10,123 @@ unless they affect users.
 Entries are grouped under an unreleased heading until a release is cut, then
 moved under the corresponding version heading.
 
-## [Unreleased]
+## [0.7.0] - 2026-08-24
 
-Fragmented ICMPv6 through NAT64: large pings work end to end
-(RFC 8200 §4.5, RFC 6146 §3.4).
+**Full RFC coverage milestone.** Every requirement ydn64 can honour across
+the covered RFCs (NAT behavioural BCPs, Stateful NAT64, DNS64 and the DNS
+protocol RFCs they cite) is now implemented and verified; whatever remains
+open in [context/RFCs.txt](context/RFCs.txt) is a deliberate deviation or
+an architectural N/A, each documented with rationale. The black-box podman
+suite grew to 16 end-to-end cases exercising every behaviour below.
 
-- The intercepted ICMPv6 path no longer assumes a fixed Next Header offset:
-  extension-header chains (Hop-by-Hop, Routing, Destination Options,
-  Fragment) are walked properly, with malformed chains dropped and other
-  protocols passed through to gVisor untouched.
-- Fragmented Echo Requests are reassembled in a strictly bounded table
-  (≤64 datagrams, ≤16 fragments each, ≤64 KiB total, 30 s lifetime; overlap
-  cancels the datagram per RFC 5722) before translation, and oversized
-  replies are emitted as proper IPv6 fragments so they survive the peer's
-  MTU enforcement. `ping6 -s 2000` / `-s 4000` now complete through NAT64.
+### NAT64 now behaves like a real stateful NAT gateway (RFC 4787 / RFC 5382 / RFC 5508 / RFC 6146)
 
-Anti-abuse hardening: per-source DNS64 rate limiting and NAT64 quotas
-(RFC 5358, RFC 6146 §5.3).
-
-- **RFC 5358 — per-source DNS64 rate limiting**: new `Dns64RateLimit` key
-  (default 50 queries/s per source, small burst allowance, reloadable via
-  SIGHUP). Over-budget UDP queries are REFUSED with strict reply spacing or
-  dropped; over-budget TCP connections are closed. A single allowed peer can
-  no longer drive the embedded resolver as a query engine.
-- **RFC 6146 §5.3 — NAT64 per-source ceilings**: `Nat64MaxUDPSessionsPerSource`
-  (default 256) and `Nat64MaxTCPConnectionsPerSource` (default 128) stop one
-  peer from occupying every translator slot. Both are SIGHUP-reloadable;
-  flows beyond the cap are shed before any state is created.
-- **Keep-alive-attack fix**: NAT64 UDP session lifetime is now refreshed only
-  by the client's own outbound datagrams (RFC 4787 REQ-5's rule). Inbound v4
-  replies no longer extend sessions, so pointing one datagram at a chatty
+- **UDP endpoint-independent mapping (RFC 4787 REQ-1, RFC 6146 §3.1/§5.2)** —
+  one client source socket keeps ONE external `ip:port` across ALL its IPv4
+  destinations (a single shared outbound socket per client). STUN/ICE-based
+  traversal (WebRTC, QUIC, P2P hole punching) works through the translator;
+  replies from any contacted server reach the client on the same mapping.
+- **UDP port parity preservation (RFC 4787 REQ-3)** — the NAT-assigned
+  external port keeps the client source port's even/odd parity by default,
+  which RTP/RTCP-style media flow pairs expect. New `Nat64PortParity` key
+  (`preserve` | `do-not-preserve`, default `preserve`, SIGHUP-reloadable).
+- **UDP endpoint-independent filtering (RFC 4787 REQ-8)** —
+  `Nat64UdpFiltering: endpoint-independent` delivers unsolicited inbound
+  IPv4 datagrams to any mapped client, even senders it never contacted:
+  they are re-originated as IPv6/UDP (`pool6::sender`) and injected onto the
+  Yggdrasil leg without creating session state. This completes hole
+  punching: after a peer learns the client's external mapping it can punch
+  inbound. Off by default (widens the inbound surface); `address-dependent`
+  remains the mandated default, `address-and-port-dependent` stays available.
+- **Proxied-TCP idle expiry (RFC 5382 REQ-5)** — idle-but-alive proxied TCP
+  connections are expired after `Nat64TcpTimeout` (validation floor 7440 s =
+  2h04m), closing both legs and freeing global/per-source slots. Refreshed
+  by payload traffic only, never by keepalives.
+- **ICMPv4 error translation (RFC 7915 §4.2/§4.3, RFC 5508 REQ-3/REQ-4)** —
+  Destination Unreachable, Time Exceeded, Parameter Problem and Packet Too
+  Big messages about tracked flows are translated per the type/code tables
+  (with RFC 1191 plateau MTU fallback) and delivered to the client with the
+  quoted packet rebuilt to its original tuple. IPv6-side PMTUD now converges
+  for UDP flows; closed v4 ports fail fast instead of hanging. ydn64 also
+  generates ICMPv6 Destination Unreachables for undialable flows and v4
+  port-refusals (RFC 4443 §3.1). Synthesised errors are rate-limited and
+  truncated to the 1280-byte budget; TCP is deliberately excluded because
+  proxied connections terminate twice and the OS consumes those errors.
+- **Fragmented ICMPv6 through NAT64 (RFC 8200 §4.5, RFC 6146 §3.4)** — the
+  intercepted ICMPv6 path walks extension-header chains properly, reassembles
+  fragmented Echo Requests in a strictly bounded table (≤64 datagrams,
+  ≤16 fragments, ≤64 KiB, 30 s; overlap cancels per RFC 5722) and emits
+  oversized replies as proper IPv6 fragments. `ping6 -s 2000/-s 4000`
+  completes end to end, including toward real internet hosts.
+- **NAT-assigned Echo identifiers** start from an unpredictable value, and
+  ICMP sessions carry a 60-second lifetime floor.
+- **Anti-abuse ceilings (RFC 5358, RFC 6146 §5.3)** — new SIGHUP-reloadable
+  keys `Dns64RateLimit` (50 qps/source, REFUSED with strict reply spacing),
+  `Nat64MaxUDPSessionsPerSource` (256) and `Nat64MaxTCPConnectionsPerSource`
+  (128) stop one allowed peer from monopolising resolver or translator
+  state. NAT64 UDP session lifetimes are refreshed only by the client's own
+  outbound datagrams (RFC 4787 REQ-5), so pointing one datagram at a chatty
   server cannot pin an outbound socket indefinitely.
 
-## [Unreleased]
+### DNS64 hardened to standards-complete (RFC 6147 / RFC 6891 / RFC 6052 / RFC 7766)
 
-ICMP error translation: traceroute and PMTUD now work through NAT64.
+- **EDNS(0) option passthrough (RFC 6891)** — response OPT records are
+  rebuilt on both UDP and TCP paths while carrying OPTIONS across the proxy
+  hop: upstream server cookies round-trip to the real-internet forwarder
+  (transparent DNS COOKIE support, RFC 7873) and ECS responses flow back
+  (RFC 7871), locally generated answers echo the client COOKIE, and classic
+  non-EDNS clients never receive an OPT. Size advertisement is unchanged:
+  client-advertised values honoured up to the 4096-byte cap — with the
+  legacy floor tightened so non-EDNS queries are answered within 512 bytes
+  (+TC beyond), per RFC 6891 §6.2.5.
+- **DNSSEC minimum viable subset (RFC 6147 §5.5)** — validating clients
+  sending CD=1+DO=1 get their queries relayed upstream verbatim (no
+  synthesis, no caching); ydn64 never asserts the AD bit on answers it
+  generates or modifies.
+- **AAAA special exclusion set (RFC 6147 §5.1.4)** — new SIGHUP-reloadable
+  `Dns64AAAAExcludedSubnets` key strips real AAAA answers inside configured
+  prefixes (the standards-blessed "my clients can't reach these" list);
+  synthesised records are never affected.
+- **All RFC 6052 §2.2 prefix layouts accepted** — `Nat64Pool` and zone
+  `prefix` values may be `/32`, `/40`, `/48`, `/56`, `/64` or `/96`,
+  validated including the u-octet rules; addresses with dirty bits are
+  rejected at startup instead of misbehaving silently.
+- **Cache honours upstream TTLs** instead of a fixed value; expired entries
+  are purged first under memory pressure (`Dns64MaxCacheEntries`).
+- **Pipelined DNS-over-TCP processed concurrently (RFC 7766 §6.2.1.1/§7)** —
+  queries on one connection are dispatched immediately and answered out of
+  order, so a slow upstream lookup no longer head-of-line-blocks later
+  queries; bounded per-connection fan-out and idle-timeout resets follow
+  §6.2.2–§6.2.4.
 
-- **RFC 7915 §4.2/§4.3 + RFC 5508 REQ-3/REQ-4 — ICMPv4 error translation**.
-  ydn64 no longer discards ICMPv4 errors about traffic it sent toward real
-  IPv4 destinations. Destination Unreachable, Time Exceeded and Parameter
-  Problem messages are demuxed against live NAT64 sessions (UDP tuples and
-  allocated Echo identifiers), translated per the RFC 7915 §4.2 type/code
-  tables (including Packet Too Big MTU adjustment with RFC 1191 plateau
-  fallback), and injected back to the originating Yggdrasil client with the
-  quoted packet reconstructed to its original tuple. **IPv6-side PMTUD now
-  converges for UDP flows, closed v4 ports fail fast instead of hanging,
-  and every ICMPv4 error the IPv4 path produces for a tracked flow reaches
-  the client as translated ICMPv6.** (Classic hop-by-hop `traceroute`
-  remains limited: re-originated datagrams start with a fresh IPv4 TTL, so
-  early-hop Time Exceeded replies cannot occur.) Synthesised errors are
-  rate-limited and truncated to the 1280-byte minimum-IPv6-MTU budget;
-  TCP is deliberately excluded because proxied connections terminate twice
-  and the OS stack consumes v4-side TCP errors itself.
-- **RFC 4443 §3.1 — generated Destination Unreachables**: UDP flows whose
-  outbound dial fails, or whose OS socket surfaces a kernel-received v4
-  Port Unreachable, are reported to the client as ICMPv6 Destination
-  Unreachable instead of silently blackholing.
+### Forgery resistance (RFC 5452)
+
+- Upstream exchanges carry a **randomly chosen transaction ID** — the
+  client's own ID never leaves the node, so an allowed client cannot dictate
+  the ID an off-path spoofer must guess.
+- **0x20 query-name randomisation (RFC 5452 §9.1)** — every upstream query
+  name carries random per-character case and the answer must echo it
+  byte-for-byte or be discarded; the client's original casing is restored on
+  request and response. Forwarders failing the check repeatedly are treated
+  as 0x20-incapable and temporarily exempted, degrading hardening rather
+  than availability.
+
+### Robustness, safety and packaging
+
+- **Broken configs fail loudly**: validation now rejects invalid
+  combinations at load instead of misbehaving silently, and an empty
+  `AllowedSources` produces a prominent warning (it denies every client).
+- **Bounded resources by default**: NAT64 UDP sessions, proxied TCP
+  connections, DNS cache entries and concurrent DNS64 queries all carry
+  configurable caps (`Nat64Max*`, `Dns64Max*`); overflow sheds work instead
+  of exhausting memory.
+- Netstack robustness: fixed a shared-buffer data race in the NIC write
+  path, hardened the inbound ICMP path, and the netstack read loop is now
+  supervised (restart-on-exit with drop counters surfaced in stats).
+- Release artefacts ship licence obligations: every archive/image carries
+  `LICENSE` + generated `THIRD-PARTY-NOTICES.txt`; GitHub Actions now build
+  multi-arch container images and cross-platform binaries on version tags,
+  with a CI pipeline on every push/PR.
 
 ## [0.6.0] - 2026-08-23
 
