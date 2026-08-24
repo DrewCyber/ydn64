@@ -2,8 +2,10 @@ package dns64
 
 import (
 	"fmt"
+	"math/rand"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -14,6 +16,45 @@ import (
 
 	"github.com/DrewCyber/ydn64/src/netstack"
 )
+
+// x20MaxConsecutiveFailures and x20DisableDuration shape the graceful
+// degradation of RFC 5452 §9.1 0x20 name randomisation: after this many
+// consecutive case-mismatched answers from ONE forwarder, ydn64 stops
+// randomising toward it for a while instead of failing every lookup — a
+// canonicalising (0x20-incapable) upstream must degrade security, not
+// availability. Randomisation resumes automatically once the window elapses;
+// a single case-matching answer clears the counter immediately.
+var (
+	x20MaxConsecutiveFailures = 3
+	x20DisableDuration        = time.Minute
+)
+
+// x20State tracks 0x20 health for one forwarder address.
+type x20State struct {
+	mu            sync.Mutex
+	strikes       int       // consecutive mismatched answers
+	disabledUntil time.Time // zero = randomisation active
+}
+
+func (s *x20State) active(now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return now.After(s.disabledUntil)
+}
+
+func (s *x20State) record(ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ok {
+		s.strikes = 0
+		return
+	}
+	s.strikes++
+	if s.strikes >= x20MaxConsecutiveFailures {
+		s.disabledUntil = time.Now().Add(x20DisableDuration)
+		s.strikes = 0
+	}
+}
 
 // proxyConfig holds the reloadable subset of DNS64 behaviour (Dns64Default,
 // Dns64Zones, Dns64InvalidAddress, IgnoredDstSubnets, Dns64AAAAExcludedSubnets).
@@ -32,6 +73,10 @@ type proxy struct {
 	cache *dnsCache
 	cfg   atomic.Pointer[proxyConfig]
 	ns    *netstack.YggdrasilNetstack // used to dial Yggdrasil-native (200::/7) forwarders
+
+	// x20 maps forwarder address → *x20State for the RFC 5452 §9.1 0x20
+	// query-name randomisation health tracking. Zero value ready.
+	x20 sync.Map
 }
 
 // reload atomically replaces the zone table, default forwarder,
@@ -79,22 +124,84 @@ var ipv4OnlyARPAIPs = []net.IP{
 // the Yggdrasil address range (200::/7) are dialled through the embedded
 // gVisor netstack; everything else uses the host OS network stack.
 //
-// RFC 5452 §9.2: the transaction ID used upstream is chosen randomly by
-// ydn64, never relayed from the client's query — an allowed client must not
-// be able to dictate the ID an off-path spoofer has to guess. The DNS
-// library discards any upstream answer whose ID does not match the one sent,
-// and the client's original ID is restored on the response before it is
-// returned (several handlers forward the upstream response object itself).
+// Two independent forgery defences wrap every upstream exchange (RFC 5452):
+//
+//   - §9.2 query-ID unpredictability: the transaction ID used upstream is
+//     chosen randomly by ydn64, never relayed from the client's query — an
+//     allowed client must not be able to dictate the ID an off-path spoofer
+//     has to guess. The DNS library discards any upstream answer whose ID
+//     does not match, and the client's original ID is restored on the
+//     response before it is returned (several handlers forward the upstream
+//     response object itself).
+//   - §9.1 0x20 randomisation: the query NAME sent upstream carries random
+//     per-character case and the answer's question section must echo it
+//     byte-for-byte; anything else cannot be the answer to our query and is
+//     discarded. The client's original name case is restored on both the
+//     request and the response — callers never see the randomised form.
+//     Forwarders that keep failing the echo check are treated as 0x20-
+//     incapable and temporarily exempted (see x20State), trading the
+//     hardening for availability instead of failing every lookup.
 func (p *proxy) lookup(server string, req *dns.Msg) (*dns.Msg, error) {
 	origID := req.Id
 	req.Id = dns.Id()
 	defer func() { req.Id = origID }()
 
+	var origName, sentName string
+	check := false
+	if len(req.Question) > 0 && p.x20StateFor(server).active(time.Now()) {
+		origName = req.Question[0].Name
+		sentName = randomizeNameCase(origName)
+		req.Question[0].Name = sentName
+		check = true
+		defer func() { req.Question[0].Name = origName }()
+	}
+
 	resp, err := p.lookupUpstream(server, req)
 	if resp != nil {
 		resp.Id = origID
 	}
+
+	if check && resp != nil {
+		// A reply without a question section cannot be verified but is also
+		// not evidence of forgery; treat it as matched (the ID check above
+		// still applied).
+		matched := len(resp.Question) == 0 || resp.Question[0].Name == sentName
+		p.x20StateFor(server).record(matched)
+		if !matched {
+			return nil, fmt.Errorf("forwarder %s: 0x20 case mismatch", server)
+		}
+		if len(resp.Question) > 0 {
+			resp.Question[0].Name = origName
+		}
+	}
 	return resp, err
+}
+
+// x20StateFor returns the per-forwarder 0x20 health entry, creating it on
+// first use (LoadOrStore keeps concurrent first queries on one entry).
+func (p *proxy) x20StateFor(server string) *x20State {
+	actual, _ := p.x20.LoadOrStore(server, &x20State{})
+	return actual.(*x20State)
+}
+
+// randomizeNameCase applies random case to every ASCII letter of a DNS name —
+// the 0x20 bit of RFC 5452 §9.1. Dots and non-letter bytes are untouched;
+// digits have no case to flip.
+func randomizeNameCase(name string) string {
+	b := []byte(name)
+	for i, c := range b {
+		switch {
+		case c >= 'a' && c <= 'z':
+			if rand.Intn(2) == 1 {
+				b[i] = c - ('a' - 'A')
+			}
+		case c >= 'A' && c <= 'Z':
+			if rand.Intn(2) == 1 {
+				b[i] = c + ('a' - 'A')
+			}
+		}
+	}
+	return string(b)
 }
 
 // lookupUpstream sends req to the configured forwarder unchanged.

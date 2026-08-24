@@ -4,8 +4,8 @@ ydn64 — RFC REFERENCE LIST
 Authoritative list of the RFCs that ydn64's NAT64 and DNS64 implementations
 are measured against, with current implementation status.
 
-Last reviewed: 2026-08-24 (RFC 6891 EDNS(0) option passthrough — COOKIE /
-CLIENT-SUBNET round-trip — landed in one session)
+Last reviewed: 2026-08-24 (RFC 5452 §9.1 0x20 query-name randomisation
+landed in one session; RFC 4787 REQ-3 and RFC 6891 EDNS(0) options earlier)
 Documented deviations: README.md, "Standards conformance and deliberate deviations"
 
 DESIGN GOAL: ydn64 aims to work well for Yggdrasil clients, NOT to be a
@@ -268,13 +268,19 @@ RFC 2308 — Negative Caching of DNS Queries (DNS NCACHE)               [DONE]
     SOA-based negative caching works downstream.
 
 RFC 5452 — Measures for Making DNS More Resilient against Forged
-           Answers                                                 [PARTIAL]
+           Answers                                                    [DONE]
     Source port is randomised by the OS. §9.2 query-ID unpredictability:
     upstream queries carry a ydn64-chosen random transaction ID — the
     client's own ID never leaves the node; answers whose ID does not
     match are discarded and the client's ID restored on return.       [DONE]
-    0x20 name randomisation is optional hardening; not
-    implemented.                                                      [TODO]
+    §9.1 0x20 name randomisation: every upstream exchange carries a
+    randomly-cased query name and the answer must echo it byte-for-byte;
+    mismatches are discarded (the client's original case is restored on
+    both request and response). Forwarders failing the check on several
+    consecutive answers are temporarily exempted from randomisation so a
+    0x20-incapable upstream degrades hardening, not availability;
+    randomisation resumes when the window elapses or a matching answer
+    arrives.                                                          [DONE]
 
 RFC 7766 — DNS Transport over TCP - Implementation Requirements      [DONE]
     §3 TCP support and §6.2.1 idle timeouts are implemented.          [DONE]
