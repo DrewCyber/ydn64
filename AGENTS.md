@@ -168,10 +168,16 @@ only the mechanics that matter when changing code:
 - [sighup-reload.md](context/sighup-reload.md) — design note for the SIGHUP
   live config reload path.
 - [dns64-parameters.txt](context/dns64-parameters.txt) — DNS64 parameter notes.
-- [code-review-2026-08-23.md](context/code-review-2026-08-23.md) — consolidated
-  open engineering findings (races, CI, resource bounds, validation gaps);
-  re-verified after the 2026-08 gVisor migration. RFC-status items are NOT
-  tracked there — see RFCs.txt above.
+- The consolidated code review of 2026-08-23 (formerly
+  `context/code-review-2026-08-23.md`) is CLOSED and the file removed: every
+  finding is fixed (git history documents each fix) except these deliberate
+  deferrals — per-source token-bucket rate limiting via `golang.org/x/time/rate`
+  (fairness only; all structures are already bounded by the `Dns64/Nat64Max*`
+  caps), full Attach/Close synchronisation of `YggdrasilNIC.dispatcher`,
+  plumbing `context.Context` into upstream dials (mitigated by the 5 s
+  service `Drain`), a configurable TCP keepalive window, and hot-path
+  optimisations gated on profiling. Revisit on demand. Protocol-conformance
+  status lives ONLY in RFCs.txt above.
 
 
 ## Changelog
