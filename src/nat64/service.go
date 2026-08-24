@@ -52,6 +52,11 @@ type Service struct {
 
 	ns       NetStack
 	sessions sync.Map // sessionKey → *udpSession
+	// bibs holds one Binding Information Base entry per client (address,
+	// port) pair (bibKey → *udpBIB). Each entry owns ONE unconnected UDP4
+	// socket shared by every destination that client talks to — this is the
+	// endpoint-independent mapping of RFC 4787 REQ-1 / RFC 6146 §3.1/§5.2.
+	bibs sync.Map
 	// tcpConns tracks live proxied TCP connections (*tcpPair keyed by
 	// itself) so the cleanup loop can expire idle ones (RFC 5382 REQ-5).
 	tcpConns sync.Map
@@ -119,6 +124,7 @@ type nat64Settings struct {
 	ignoredDstNets []*net.IPNet
 	udpTimeout     time.Duration
 	tcpTimeout     time.Duration
+	udpFiltering   udpFilterMode
 	maxUDPSessions int64 // ≤0 = unlimited
 	// Per-source anti-abuse ceilings (RFC 6146 §5.3); ≤0 = unlimited.
 	maxUDPSessionsPerSrc int64
@@ -149,6 +155,7 @@ func NewService(cfg config.NAT64Config, allowedSources []string, ignoredDstSubne
 		ignoredDstNets:       config.ParseIPNets(ignoredDstSubnets),
 		udpTimeout:           time.Duration(cfg.UDPTimeout) * time.Second,
 		tcpTimeout:           time.Duration(cfg.TCPTimeout) * time.Second,
+		udpFiltering:         parseUDPFilterMode(cfg.UDPFiltering),
 		maxUDPSessions:       int64(cfg.MaxUDPSessions),
 		maxUDPSessionsPerSrc: int64(cfg.MaxUDPSessionsPerSrc),
 		maxTCPClientsPerSrc:  int64(cfg.MaxTCPConnectionsPerSrc),
@@ -157,17 +164,18 @@ func NewService(cfg config.NAT64Config, allowedSources []string, ignoredDstSubne
 }
 
 // Reload atomically replaces AllowedSources, IgnoredDstSubnets, Nat64UdpTimeout,
-// Nat64TcpTimeout, Nat64MaxUDPSessions and the per-source anti-abuse ceilings
-// with new values, e.g. in response to a SIGHUP-triggered config reload. Safe
-// to call concurrently with in-flight traffic; other NAT64 settings (Nat64Pool,
-// Nat64Enable, Nat64MaxTCPConnections) are not reloadable and require a
-// process restart to change.
+// Nat64TcpTimeout, Nat64UdpFiltering, Nat64MaxUDPSessions and the per-source
+// anti-abuse ceilings with new values, e.g. in response to a SIGHUP-triggered
+// config reload. Safe to call concurrently with in-flight traffic; other
+// NAT64 settings (Nat64Pool, Nat64Enable, Nat64MaxTCPConnections) are not
+// reloadable and require a process restart to change.
 func (s *Service) Reload(cfg config.NAT64Config, allowedSources []string, ignoredDstSubnets []string) {
 	s.settings.Store(&nat64Settings{
 		allowedNets:          config.ParseAllowedNets(allowedSources),
 		ignoredDstNets:       config.ParseIPNets(ignoredDstSubnets),
 		udpTimeout:           time.Duration(cfg.UDPTimeout) * time.Second,
 		tcpTimeout:           time.Duration(cfg.TCPTimeout) * time.Second,
+		udpFiltering:         parseUDPFilterMode(cfg.UDPFiltering),
 		maxUDPSessions:       int64(cfg.MaxUDPSessions),
 		maxUDPSessionsPerSrc: int64(cfg.MaxUDPSessionsPerSrc),
 		maxTCPClientsPerSrc:  int64(cfg.MaxTCPConnectionsPerSrc),
@@ -283,8 +291,8 @@ func (s *Service) Start(ctx context.Context, logger *log.Logger) {
 	go s.statsLoop(ctx, logger, statsInterval)
 
 	cur := s.settings.Load()
-	logger.Printf("NAT64 started  pool6=%s  udp_timeout=%s  tcp_timeout=%s  sources=%v  icmp=%v",
-		s.pool6Net, cur.udpTimeout, cur.tcpTimeout, cur.allowedNets, s.icmpConn != nil)
+	logger.Printf("NAT64 started  pool6=%s  udp_timeout=%s  tcp_timeout=%s  udp_filter=%s  sources=%v  icmp=%v",
+		s.pool6Net, cur.udpTimeout, cur.tcpTimeout, cur.udpFiltering, cur.allowedNets, s.icmpConn != nil)
 }
 
 // interceptPacket dispatches a raw IPv6 packet from the NIC read path to the
@@ -317,14 +325,15 @@ func (s *Service) cleanupSessions(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			// Close both legs of every open UDP session; the relay loops exit
-			// on the closed conns and delete their map entries themselves.
+			// Close the client-facing endpoint of every open UDP session and
+			// every BIB socket; the relay loops exit on the closed conns and
+			// delete their map entries themselves.
 			s.sessions.Range(func(_, v any) bool {
-				sess := v.(*udpSession)
-				sess.conn6.Close()
-				if sess.outConn != nil {
-					sess.outConn.Close()
-				}
+				v.(*udpSession).conn6.Close()
+				return true
+			})
+			s.bibs.Range(func(_, v any) bool {
+				v.(*udpBIB).uconn.Close()
 				return true
 			})
 			// Same for every tracked proxied TCP connection: closing both
@@ -349,10 +358,22 @@ func (s *Service) cleanupSessions(ctx context.Context) {
 					if atomic.LoadInt64(&sess.lastSeenNs) < cutoff {
 						// Close the gVisor endpoint (unregisters it from the
 						// demuxer, so later datagrams of this tuple start a
-						// fresh session) and the udp4 socket; both relay
-						// loops then exit and delete the key.
+						// fresh session); the forward loop exits and deletes
+						// the key (and its BIB flow entry) itself.
 						sess.conn6.Close()
-						sess.outConn.Close()
+					}
+					return true
+				})
+				// BIB entries live and die on the same client-activity
+				// clock: every outbound datagram touches both stamps, so a
+				// BIB expires within one tick of its last flow going idle.
+				// Closing the socket ends the reply loop; any straggler
+				// forward loops fail their next WriteToUDP and tear down.
+				s.bibs.Range(func(k, v any) bool {
+					bib := v.(*udpBIB)
+					if atomic.LoadInt64(&bib.lastSeenNs) < cutoff {
+						bib.uconn.Close()
+						s.bibs.CompareAndDelete(k.(bibKey), bib)
 					}
 					return true
 				})

@@ -290,11 +290,22 @@ func newUDPTestEnv(t *testing.T, udpTimeout int) *udpTestEnv {
 	}
 }
 
-// inject delivers a synthetic inbound IPv6+UDP datagram into the stack the
-// same way the YggdrasilNIC read loop delivers real ones.
+// inject delivers a synthetic inbound IPv6+UDP datagram aimed at the
+// loopback IPv4 destination the same way the YggdrasilNIC read loop
+// delivers real ones.
 func (env *udpTestEnv) inject(t *testing.T, src net.IP, srcPort uint16, dstPort uint16, payload []byte) {
 	t.Helper()
-	pool6Dst := net.ParseIP("300:1:2:3::7f00:0001").To16() // embeds 127.0.0.1
+	env.injectTo(t, src, srcPort, "127.0.0.1", dstPort, payload)
+}
+
+// injectTo is inject with an explicit embedded IPv4 destination (the last
+// four bytes of the pool6 address). dstV4 must be a loopback address the
+// test host can actually reach.
+func (env *udpTestEnv) injectTo(t *testing.T, src net.IP, srcPort uint16, dstV4 string, dstPort uint16, payload []byte) {
+	t.Helper()
+	pool6Dst := make(net.IP, 16)
+	copy(pool6Dst, net.ParseIP("300:1:2:3::").To16())
+	copy(pool6Dst[12:], net.ParseIP(dstV4).To4())
 	pkt := buildIPv6UDPTestPacket(src, pool6Dst, srcPort, dstPort, payload)
 	pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(pkt)})
 	env.nic.dispatcher.DeliverNetworkPacket(ipv6.ProtocolNumber, pkb)

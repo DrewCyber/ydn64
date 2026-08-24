@@ -58,8 +58,9 @@ func takeStatSnapshot(st tcpip.Stats) statSnapshot {
 }
 
 // formatStatsDelta renders one compact greppable line: deltas of all counted
-// metrics plus absolute gauges (established connections, live NAT sessions).
-func formatStatsDelta(prev, cur statSnapshot, sessUDP, sessICMP int) string {
+// metrics plus absolute gauges (established connections, live NAT sessions
+// and BIB entries).
+func formatStatsDelta(prev, cur statSnapshot, sessUDP, sessBibs, sessICMP int) string {
 	var b strings.Builder
 	b.WriteString("netstack stats:")
 	fmt.Fprintf(&b, " ipRx=%d", cur.ipRx-prev.ipRx)
@@ -79,6 +80,7 @@ func formatStatsDelta(prev, cur statSnapshot, sessUDP, sessICMP int) string {
 	fmt.Fprintf(&b, " icmp6EchoReqRx=%d", cur.icmp6EchoReqRx-prev.icmp6EchoReqRx)
 	fmt.Fprintf(&b, " icmp6EchoRepTx=%d", cur.icmp6EchoRepTx-prev.icmp6EchoRepTx)
 	fmt.Fprintf(&b, " sessUdp=%d", sessUDP)
+	fmt.Fprintf(&b, " bibs=%d", sessBibs)
 	fmt.Fprintf(&b, " sessIcmp=%d", sessICMP)
 	return b.String()
 }
@@ -108,6 +110,7 @@ func (s *Service) logStatsDelta(logger *log.Logger) {
 	logger.Debugf("%s", formatStatsDelta(
 		prev, cur,
 		countSyncMap(&s.sessions),
+		countSyncMap(&s.bibs),
 		countSyncMap(&s.icmpSessions),
 	))
 }

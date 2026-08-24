@@ -307,11 +307,17 @@ via a raw socket. There is no IP-header translation anywhere in the path.
   fragmented Echo Requests in a bounded table (≤64 datagrams, ≤16 fragments
   each, ≤64 KiB total, 30 s lifetime), and emits oversized replies as proper
   IPv6 fragments (RFC 8200 §4.5, RFC 6146 §3.4).
-- **Mapping is address-and-port-dependent ("symmetric NAT").** RFC 6146 §5.2
-  requires Endpoint-Independent Mapping; `ydn64` opens a separate outbound
-  socket per destination, so a client's external port differs per peer. This
-  means **STUN/ICE-based NAT traversal (WebRTC, most P2P) does not currently
-  work through `ydn64`.**
+- **UDP mapping is endpoint-independent; TCP remains per-connection.** UDP
+  follows RFC 4787 REQ-1 / RFC 6146 §5.2: one client socket keeps ONE external
+  `ip:port` across ALL of its destinations (a single shared outbound socket
+  per client), so STUN/ICE-based NAT traversal (WebRTC, QUIC, P2P hole
+  punching) works through `ydn64`'s NAT64. Which inbound IPv4 senders are
+  relayed back is configurable via `Nat64UdpFiltering`: `address-dependent`
+  (the RFC 6146 §5.2-mandated default — any port of an already-contacted
+  server IP) or `address-and-port-dependent` (strictest; exact tuple only).
+  True endpoint-independent *filtering* (relaying datagrams from
+  never-contacted senders onto the client leg) is not implemented. TCP
+  connections are still proxied one-outbound-socket-per-connection.
 - **No DNSSEC validation.** `ydn64` is a security-oblivious DNS64 in the
   RFC 6147 §3 sense; synthesised answers cannot be validated by the client.
   Validating clients are handled per RFC 6147 §5.5: queries carrying both

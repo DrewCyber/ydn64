@@ -84,7 +84,7 @@ func TestFormatStatsDelta(t *testing.T) {
 	cur.udpUnknownPort += 2
 	cur.tcpEst++ // gauge: logged as absolute value
 
-	line := formatStatsDelta(prev, cur, 4, 1)
+	line := formatStatsDelta(prev, cur, 4, 2, 1)
 
 	if !strings.HasPrefix(line, "netstack stats:") {
 		t.Errorf("stats line lacks prefix: %q", line)

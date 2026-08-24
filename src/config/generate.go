@@ -227,6 +227,18 @@ func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string, peers, allowed
 	sb.WriteString("  # Idle timeout in seconds before a UDP NAT64 session is expired.\n")
 	sb.WriteString("  Nat64UdpTimeout: 300\n\n")
 
+	sb.WriteString("  # Filtering applied to datagrams arriving at a NAT-assigned UDP\n")
+	sb.WriteString("  # port (RFC 6146 section 5.2 / RFC 4787 REQ-8). One client source\n")
+	sb.WriteString("  # socket shares one NAT port across ALL its destinations\n")
+	sb.WriteString("  # (endpoint-independent mapping, RFC 4787 REQ-1), so this governs\n")
+	sb.WriteString("  # which inbound IPv4 senders are relayed back to the client:\n")
+	sb.WriteString("  #   \"address-dependent\" (default) - any port of an IPv4 address the\n")
+	sb.WriteString("  #     client has already sent to is accepted.\n")
+	sb.WriteString("  #   \"address-and-port-dependent\" - additionally requires the exact\n")
+	sb.WriteString("  #     server port (strictest; the pre-EIM behaviour).\n")
+	sb.WriteString("  # Reloadable via SIGHUP.\n")
+	sb.WriteString("  Nat64UdpFiltering: \"address-dependent\"\n\n")
+
 	sb.WriteString("  # Idle timeout in seconds before an idle-but-alive proxied TCP\n")
 	sb.WriteString("  # connection is expired and both legs are closed (freeing its\n")
 	sb.WriteString("  # connection slots). Refreshed by payload traffic in either\n")

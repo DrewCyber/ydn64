@@ -58,18 +58,14 @@ RFC 6146 — Stateful NAT64: Network Address and Protocol Translation from
                      longer pin sockets — the keep-alive behaviour this
                      subsection warns about)                        [DONE]
       - §3.1 / §5.2  Binding Information Base -> Endpoint-Independent
-                     Mapping (unblocks STUN/ICE/WebRTC)            [DEFERRED]
-                     Design sketch for when this is picked up:
-                     split sessions into a BIB keyed on
-                     (srcAddr6, srcPort) -> (hostV4, allocPort) plus a
-                     lifetime/session table; one UNCONNECTED
-                     net.ListenUDP per BIB entry (WriteTo/ReadFrom +
-                     demux inbound by real source) replaces DialUDP per
-                     destination; filtering becomes an explicit REQ-8
-                     knob; session caps MUST land together. No new
-                     privileges required. UDP-only EIM covers WebRTC/
-                     QUIC/WireGuard and is small; TCP EIM means
-                     abandoning the gVisor forwarder (Tier 4).
+                     Mapping, UDP: one unconnected ListenUDP per client
+                     socket (srcAddr6, srcPort) shared across all its
+                     destinations; per-tuple sessions are demuxed off the
+                     shared socket by the configured filtering policy;
+                     global/per-source caps and idle expiry landed together.
+                     Unblocks STUN/ICE/WebRTC/QUIC hole punching.
+                     (TCP EIM would mean abandoning the gVisor forwarder
+                     and stays out of scope.)                            [DONE]
       - §3.5.2       TCP state machine                                  [N/A]
                      (gVisor owns TCP state; idle proxied connections are
                      instead expired wholesale per RFC 5382 REQ-5)
@@ -175,15 +171,22 @@ These BCPs are where RFC 6146's mapping, filtering and timer MUSTs
 actually live. They were absent from the earlier version of this list.
 
 RFC 4787 (BCP 127) — NAT Behavioral Requirements for Unicast UDP   [PARTIAL]
-    REQ-1 Endpoint-Independent Mapping                            [DEFERRED]
+    REQ-1 Endpoint-Independent Mapping (UDP): one BIB entry with one
+          shared outbound socket per client (addr, port); same external
+          ip:port toward every destination                              [DONE]
     REQ-3 port parity / range preservation                            [TODO]
     REQ-5 mapping timer >= 2 min, default >= 5 min
          (default 300 s, Validate() floor 120 s); refreshed only by the
          client's outbound datagrams per REQ-5's own rule — inbound v4
-         traffic never extends a mapping                            [DONE]
+         traffic never extends a mapping; the BIB entry lives on the
+         same client-activity clock as its sessions                   [DONE]
     REQ-6 configurable timers                                         [DONE]
-    REQ-8 filtering behaviour (currently address-and-port-dependent,
-          i.e. stricter than RECOMMENDED)                       [DEVIATION]
+    REQ-8 filtering behaviour, configurable via Nat64UdpFiltering:
+          "address-dependent" default (= RFC 6146 §5.2's mandated NAT64
+          default), "address-and-port-dependent" optional. True
+          endpoint-independent filtering (delivering datagrams from
+          never-contacted senders) is not implemented — it would need
+          raw injection onto the client leg                      [PARTIAL]
     REQ-9 hairpinning                                                  [N/A]
 
 RFC 5382 (BCP 142) — NAT Behavioral Requirements for TCP                [DONE]

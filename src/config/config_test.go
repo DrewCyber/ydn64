@@ -258,6 +258,65 @@ func TestAppConfigValidate_TCPTimeout(t *testing.T) {
 	}
 }
 
+func TestAppConfigValidate_UDPFiltering(t *testing.T) {
+	tests := []struct {
+		name        string
+		val         string
+		expectErr   bool
+		expectedVal string
+	}{
+		{
+			name:        "Default when unset",
+			val:         "",
+			expectErr:   false,
+			expectedVal: "address-dependent",
+		},
+		{
+			name:        "Address-dependent accepted",
+			val:         "address-dependent",
+			expectErr:   false,
+			expectedVal: "address-dependent",
+		},
+		{
+			name:        "Case-insensitive, normalised",
+			val:         "ADDRESS-and-port-DEPENDENT",
+			expectErr:   false,
+			expectedVal: "address-and-port-dependent",
+		},
+		{
+			name:      "Endpoint-independent rejected (not implemented)",
+			val:       "endpoint-independent",
+			expectErr: true,
+		},
+		{
+			name:      "Garbage rejected",
+			val:       "filter-everything",
+			expectErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := nat64Base()
+			cfg.Nat64UdpFiltering = tc.val
+			err := cfg.Validate()
+
+			if tc.expectErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got nil", tc.val)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.expectedVal != "" && cfg.Nat64UdpFiltering != tc.expectedVal {
+				t.Errorf("expected Nat64UdpFiltering to be %q, got %q", tc.expectedVal, cfg.Nat64UdpFiltering)
+			}
+		})
+	}
+}
+
 // TestGenconfOutputPassesValidation guards against template drift: whatever
 // -genconf prints must always pass AppConfig.Validate as-is.
 func TestGenconfOutputPassesValidation(t *testing.T) {

@@ -1,16 +1,22 @@
 // Command udpecho is a black-box test helper. It is NOT part of the ydn64
 // binary — it is baked into both test-harness container images and used by
 // test/cases/ to exercise NAT64 UDP with payloads that busybox nc cannot
-// handle (its fixed receive buffer truncates datagrams well below the
-// 1472-byte IPv6 fragmentation threshold, in both directions).
+// handle (its fixed receive buffer truncates datagrams well below the 1472-byte
+// IPv6 fragmentation threshold, in both directions).
 //
 // Server mode (default):
 //
 //	udpecho <listen-addr>        e.g. udpecho 127.0.0.1:4446
+//	udpecho -tag-client <addr>   additionally prefix replies with the observed client address
 //
 // Listens on a UDP port and echoes every received datagram back to its
 // sender, preserving payload bytes exactly (no size limit beyond UDP's own
-// 65535-byte maximum).
+// 65535-byte maximum). With -tag-client each reply becomes
+//
+//	client=<ip>:<port>|<original payload>
+//
+// so a client can learn which external (NAT) source address the server
+// observed; used by the endpoint-independent-mapping case.
 //
 // One-shot client mode:
 //
@@ -20,10 +26,22 @@
 // 10 seconds for a reply, writes it verbatim to outfile, and exits non-zero
 // on any failure (timeout, short reply, write error). Cases then compare
 // checksums/lengths of infile vs outfile to prove end-to-end integrity
-// across fragmented datagrams.
+// across fragmented datagrams. (A -tag-client prefix is tolerated and
+// stripped before writing.)
+//
+// EIM probe client mode (endpoint-independent mapping check):
+//
+//	udpecho -eim <server-addr-1> <server-addr-2> <infile> <outfile-1> <outfile-2>
+//
+// Sends the SAME payload from ONE socket to two different servers (which
+// must run with -tag-client), waits for both tagged replies, verifies both
+// payloads are intact, and asserts that BOTH servers observed the identical
+// client ip:port — the definition of endpoint-independent mapping (RFC 4787
+// REQ-1). Exits non-zero if the mappings differ or any reply is missing.
 package main
 
 import (
+	"bytes"
 	"flag"
 	"log"
 	"net"
@@ -33,7 +51,21 @@ import (
 
 const replyTimeout = 10 * time.Second
 
-func runServer(addr string) {
+// tagPrefix marks a -tag-client reply; format: "client=<ip>:<port>|<payload>".
+var tagPrefix = []byte("client=")
+
+func splitTag(p []byte) (tag string, body []byte, ok bool) {
+	if !bytes.HasPrefix(p, tagPrefix) {
+		return "", nil, false
+	}
+	sep := bytes.IndexByte(p, '|')
+	if sep < 0 {
+		return "", nil, false
+	}
+	return string(p[:sep]), p[sep+1:], true
+}
+
+func runServer(addr string, tagClient bool) {
 	conn, err := net.ListenPacket("udp", addr)
 	if err != nil {
 		log.Fatalf("udpecho: listen %s: %v", addr, err)
@@ -46,8 +78,13 @@ func runServer(addr string) {
 		if err != nil {
 			log.Fatalf("udpecho: read: %v", err)
 		}
-		if _, err := conn.WriteTo(buf[:n], client); err != nil {
-			log.Printf("udpecho: write %d bytes to %s: %v", n, client, err)
+		out := buf[:n]
+		if tagClient {
+			tag := append(append([]byte{}, tagPrefix...), []byte(client.String())...)
+			out = append(append(tag, '|'), out...)
+		}
+		if _, err := conn.WriteTo(out, client); err != nil {
+			log.Printf("udpecho: write %d bytes to %s: %v", len(out), client, err)
 		}
 	}
 }
@@ -67,7 +104,7 @@ func runClient(server, inFile, outFile string) {
 	}
 	conn, err := net.DialUDP("udp", nil, raddr)
 	if err != nil {
-		log.Fatalf("udpecho: dial %s: %v", server, err)
+		log.Fatalf("udpecho: dial: %v", err)
 	}
 	defer conn.Close()
 
@@ -81,24 +118,114 @@ func runClient(server, inFile, outFile string) {
 	if err != nil {
 		log.Fatalf("udpecho: no reply within %v: %v", replyTimeout, err)
 	}
-	if n != len(payload) {
-		log.Fatalf("udpecho: short reply: got %d bytes, want %d", n, len(payload))
+	body := buf[:n]
+	if _, b, ok := splitTag(body); ok {
+		body = b // tolerate a tagged responder in plain mode too
 	}
-	if err := os.WriteFile(outFile, buf[:n], 0644); err != nil {
+	if len(body) != len(payload) {
+		log.Fatalf("udpecho: short reply: got %d bytes, want %d", len(body), len(payload))
+	}
+	if err := os.WriteFile(outFile, body, 0644); err != nil {
 		log.Fatalf("udpecho: write %s: %v", outFile, err)
 	}
 	log.Printf("udpecho: round trip OK (%d bytes)", n)
 }
 
+func runEIMClient(serverA, serverB, inFile, outFileA, outFileB string) {
+	payload, err := os.ReadFile(inFile)
+	if err != nil {
+		log.Fatalf("udpecho: read %s: %v", inFile, err)
+	}
+
+	raddrA, err := net.ResolveUDPAddr("udp", serverA)
+	if err != nil {
+		log.Fatalf("udpecho: resolve %s: %v", serverA, err)
+	}
+	raddrB, err := net.ResolveUDPAddr("udp", serverB)
+	if err != nil {
+		log.Fatalf("udpecho: resolve %s: %v", serverB, err)
+	}
+
+	// One UNCONNECTED socket for both destinations: every datagram it sends
+	// shares one local port by construction, so any mapping difference seen
+	// by the servers is attributable to the NAT under test alone.
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{})
+	if err != nil {
+		log.Fatalf("udpecho: listen: %v", err)
+	}
+	defer conn.Close()
+
+	for _, dst := range []*net.UDPAddr{raddrA, raddrB} {
+		if _, err := conn.WriteToUDP(payload, dst); err != nil {
+			log.Fatalf("udpecho: send to %s: %v", dst, err)
+		}
+	}
+
+	type reply struct {
+		got bool
+		tag string
+	}
+	replies := map[*net.UDPAddr]*reply{raddrA: {}, raddrB: {}}
+	buf := make([]byte, 65535)
+
+	for i := 0; i < 2 && !(replies[raddrA].got && replies[raddrB].got); i++ {
+		_ = conn.SetReadDeadline(time.Now().Add(replyTimeout))
+		n, from, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			log.Fatalf("udpecho: no reply within %v: %v", replyTimeout, err)
+		}
+		var r *reply
+		switch from.Port {
+		case raddrA.Port:
+			r = replies[raddrA]
+		case raddrB.Port:
+			r = replies[raddrB]
+		default:
+			log.Fatalf("udpecho: reply from unexpected source %s", from)
+		}
+		tag, body, ok := splitTag(buf[:n])
+		if !ok {
+			log.Fatalf("udpecho: reply from %s lacks client tag (run the servers with -tag-client)", from)
+		}
+		if !bytes.Equal(body, payload) {
+			log.Fatalf("udpecho: reply payload mismatch from %s (%d bytes)", from, len(body))
+		}
+		r.got = true
+		r.tag = tag
+		switch from.Port {
+		case raddrA.Port:
+			_ = os.WriteFile(outFileA, body, 0644)
+		case raddrB.Port:
+			_ = os.WriteFile(outFileB, body, 0644)
+		}
+	}
+
+	a, b := replies[raddrA], replies[raddrB]
+	if !a.got || !b.got {
+		log.Fatalf("udpecho: missing replies (A=%v B=%v)", a.got, b.got)
+	}
+	if a.tag != b.tag {
+		log.Fatalf("udpecho: EIM VIOLATION: %s saw %s but %s saw %s (endpoint-dependent mapping)",
+			serverA, a.tag, serverB, b.tag)
+	}
+	localPort := conn.LocalAddr().(*net.UDPAddr).Port
+	log.Printf("udpecho: EIM OK — both destinations observed %s (local port %d, %d bytes intact)",
+		a.tag, localPort, len(payload))
+}
+
 func main() {
 	once := flag.Bool("once", false, "one-shot client mode")
+	eim := flag.Bool("eim", false, "EIM probe client mode: <srv1> <srv2> <infile> <out1> <out2>")
+	tagClient := flag.Bool("tag-client", false, "server mode: prefix replies with the observed client address")
 	flag.Parse()
 
 	switch {
-	case !*once && flag.NArg() == 1:
-		runServer(flag.Arg(0))
+	case !*once && !*eim && flag.NArg() == 1:
+		runServer(flag.Arg(0), *tagClient)
 	case *once && flag.NArg() == 3:
 		runClient(flag.Arg(0), flag.Arg(1), flag.Arg(2))
+	case *eim && flag.NArg() == 5:
+		runEIMClient(flag.Arg(0), flag.Arg(1), flag.Arg(2), flag.Arg(3), flag.Arg(4))
 	default:
 		flag.Usage()
 		os.Exit(2)

@@ -5,6 +5,8 @@ import (
 	"math"
 	"net"
 	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -16,7 +18,8 @@ import (
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
-// sessionKey uniquely identifies a NAT64 UDP session.
+// sessionKey uniquely identifies a NAT64 UDP session: one client socket
+// talking to one real IPv4 destination.
 // All fields are value types so the struct is directly usable as a sync.Map key.
 type sessionKey struct {
 	srcAddr [16]byte // yggdrasil source IPv6 address
@@ -25,23 +28,88 @@ type sessionKey struct {
 	dstPort uint16
 }
 
-// udpSession tracks a single NAT64 UDP flow.
+// bibKey identifies a BIB entry: the client's Yggdrasil address and source
+// port. Endpoint-independent mapping (RFC 4787 REQ-1, RFC 6146 §3.1/§5.2)
+// keys the external IPv4 mapping on exactly this pair — the same client
+// socket reaches every destination through the same allocated port.
+type bibKey struct {
+	srcAddr [16]byte
+	srcPort uint16
+}
+
+// v4Tuple identifies one destination flow on a BIB's shared socket; it is
+// the key of the BIB's per-flow table used to demux inbound datagrams.
+type v4Tuple struct {
+	addr [4]byte
+	port uint16
+}
+
+// udpBIB is one Binding Information Base entry: the endpoint-independent
+// mapping of a single client socket. It owns ONE unconnected UDP4 socket
+// whose ephemeral local port is the NAT-assigned external port for ALL
+// destinations that client talks to. A single reply loop reads the shared
+// socket and demuxes datagrams to per-tuple sessions via flows.
 //
-// Unlike the pre-forwarder implementation, the gVisor-side endpoint is
-// registered in the stack's transport demuxer by CreateEndpoint, so every
-// datagram of the flow — including the triggering one, which CreateEndpoint
-// pre-queues — is delivered directly to conn6 without any manual demuxing
-// here. The sync.Map entry only serves idle-expiry bookkeeping and gives the
-// reply loop access to both legs.
+// lastSeenNs is refreshed ONLY by the client's outbound datagrams (through
+// any of its sessions), never by inbound v4 traffic — RFC 6146 §5.3 / RFC
+// 4787 REQ-5 keep-alive protection: a chatty server cannot pin the mapping.
+type udpBIB struct {
+	uconn      *net.UDPConn // unconnected udp4 socket, ephemeral local port
+	localIP    [4]byte      // outbound socket's source address on the IPv4 side
+	localPort  uint16       // the NAT-assigned port shared by all its flows
+	lastSeenNs int64        // Unix nanosecond timestamp, updated atomically
+	flows      sync.Map     // v4Tuple → *udpSession
+}
+
+func (b *udpBIB) touch() { atomic.StoreInt64(&b.lastSeenNs, time.Now().UnixNano()) }
+
+// udpFilterMode selects which inbound senders are relayed back to the client
+// (RFC 6146 §5.2 / RFC 4787 REQ-8).
+type udpFilterMode int
+
+const (
+	// filterAddressDependent is RFC 6146 §5.2's mandated default: datagrams
+	// from ANY port of an IPv4 address the client has an active flow toward
+	// are accepted.
+	filterAddressDependent udpFilterMode = iota
+	// filterAddressAndPortDependent additionally requires the exact server
+	// port — the strictest behaviour, equivalent to the pre-EIM
+	// connected-socket semantics.
+	filterAddressAndPortDependent
+)
+
+func parseUDPFilterMode(s string) udpFilterMode {
+	if strings.EqualFold(strings.TrimSpace(s), "address-and-port-dependent") {
+		return filterAddressAndPortDependent
+	}
+	return filterAddressDependent
+}
+
+func (m udpFilterMode) String() string {
+	if m == filterAddressAndPortDependent {
+		return "address-and-port-dependent"
+	}
+	return "address-dependent"
+}
+
+// udpSession tracks one client→destination flow through its BIB.
 //
-// localIP/localPort record the OS socket's own address once assigned by the
-// kernel; ICMPv4 errors quoting that tuple are demuxed back to this session
-// for translation (see icmperr.go).
+// The gVisor-side endpoint is registered in the stack's transport demuxer by
+// CreateEndpoint, so every datagram of the client tuple — including the
+// triggering one — is delivered directly to conn6. Outbound datagrams are
+// written to the BIB's SHARED socket with WriteToUDP; inbound replies are
+// demuxed off the same socket by the BIB reply loop.
+//
+// localIP/localPort are copies of the BIB's allocation at registration time,
+// kept per-session so ICMPv4 error demuxing (icmperr.go) can match quoted
+// tuples without dereferencing the BIB.
 type udpSession struct {
-	outConn    *net.UDPConn   // connected UDP4 socket to the real IPv4 server
+	bib        *udpBIB
 	conn6      *gonet.UDPConn // connected gVisor UDP endpoint on the Yggdrasil leg
-	localIP    [4]byte        // outbound socket's source address on the IPv4 side
-	localPort  uint16         // outbound socket's NAT-assigned port
+	dst        *net.UDPAddr   // real IPv4 destination (precomputed for WriteToUDP)
+	dstAddr    [4]byte        // copy of dst.IP for cheap comparisons
+	localIP    [4]byte        // BIB's allocated IPv4 address (for ICMP err demux)
+	localPort  uint16         // BIB's allocated port (for ICMP err demux)
 	lastSeenNs int64          // Unix nanosecond timestamp, updated atomically
 }
 
@@ -151,6 +219,69 @@ func (s *Service) evictOldestIdleUDPSession() {
 	}
 }
 
+// probeRouteSourceIPv4 learns which source IPv4 address the kernel's routing
+// table would pick for datagrams toward dst, without sending anything (a
+// connect(2) on a throwaway UDP socket resolves the route and its preferred
+// source). dstPort is part of the dial target because some platforms (macOS)
+// refuse to connect() toward port 0; any real port yields the same route.
+func probeRouteSourceIPv4(dst [4]byte, dstPort uint16) (net.IP, error) {
+	port := int(dstPort)
+	if port == 0 {
+		port = 9 // discard — only the destination address shapes the route
+	}
+	c, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IP(append([]byte(nil), dst[:]...)), Port: port})
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	la := c.LocalAddr().(*net.UDPAddr)
+	src := make(net.IP, 4)
+	copy(src, la.IP.To4())
+	return src, nil
+}
+
+// getOrCreateBIB returns the BIB entry for the client socket identified by
+// key, creating (and starting the reply loop of) a fresh one on first use.
+// Concurrent creation for the same client is resolved by LoadOrStore: the
+// loser closes its surplus socket and adopts the winner's entry, so every
+// destination of one client socket always shares one external port
+// (RFC 4787 REQ-1).
+//
+// The socket is deliberately bound to the route's source address for the
+// creating flow's destination rather than left wildcard: a wildcard bind
+// would leave the BIB's external identity undefined (localIP = 0.0.0.0),
+// which the ICMPv4 error demuxer matches against quoted packets. One BIB =
+// one external source address; on a multi-homed host every flow of that
+// client egresses via the interface chosen for its first destination, which
+// matches the single-address external pool model NAT64 assumes anyway.
+func (s *Service) getOrCreateBIB(key sessionKey) (*udpBIB, error) {
+	bk := bibKey{srcAddr: key.srcAddr, srcPort: key.srcPort}
+	if b, ok := s.bibs.Load(bk); ok {
+		return b.(*udpBIB), nil
+	}
+	bindIP, err := probeRouteSourceIPv4(key.dstAddr, key.dstPort)
+	if err != nil {
+		return nil, err
+	}
+	uconn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: bindIP})
+	if err != nil {
+		return nil, err
+	}
+	b := &udpBIB{uconn: uconn}
+	if la, ok := uconn.LocalAddr().(*net.UDPAddr); ok && la.IP != nil {
+		copy(b.localIP[:], la.IP.To4())
+		b.localPort = uint16(la.Port)
+	}
+	b.touch()
+	actual, loaded := s.bibs.LoadOrStore(bk, b)
+	if loaded {
+		uconn.Close()
+		return actual.(*udpBIB), nil
+	}
+	go s.udpReplyLoop(b, bk)
+	return b, nil
+}
+
 // handleUDPForward is called by udp.NewForwarder for every inbound UDP
 // datagram that did not match a registered endpoint. It runs synchronously
 // inside gVisor's packet processing path, so only cheap filtering and endpoint
@@ -171,7 +302,10 @@ func (s *Service) handleUDPForward(req *udp.ForwarderRequest, logger *log.Logger
 	// The per-source ceiling (RFC 6146 §5.3) is checked first so one peer
 	// cannot evict or exhaust the global pool; the count itself is registered
 	// only once a session tuple is actually stored (mirroring udpSessions),
-	// so the check can overshoot by the number of in-flight dials at worst.
+	// so the check can overshoot by the number of concurrent session setups
+	// for distinct tuples at worst. With EIM, fan-out to many destinations
+	// from ONE client socket shares a single BIB but still consumes one
+	// session slot per tuple — the ceiling keeps bounding total state.
 	if c := s.srcCounts.count(flow.key.srcAddr, srcUDP); s.perSrcUDPLimit() > 0 && c >= s.perSrcUDPLimit() {
 		logger.Debugf("NAT64 UDP shedding flow %v (per-source limit %d)", flow.key, s.perSrcUDPLimit())
 		return true
@@ -205,40 +339,47 @@ func (s *Service) handleUDPForward(req *udp.ForwarderRequest, logger *log.Logger
 	s.drainWG.Add(1)
 	go func() {
 		defer s.drainWG.Done()
-		dstUDPAddr := &net.UDPAddr{
-			IP:   net.IP(flow.key.dstAddr[:]),
-			Port: int(flow.key.dstPort),
-		}
-		conn4, err := net.DialUDP("udp4", nil, dstUDPAddr)
+
+		// Reuse (or lazily create) the client's single external mapping.
+		bib, err := s.getOrCreateBIB(flow.key)
 		if err != nil {
-			logger.Debugf("NAT64 UDP dial %s: %v", dstUDPAddr, err)
+			logger.Debugf("NAT64 UDP bind %v: %v", flow.key, err)
 			// Report the failure to the client as an ICMPv6 Destination
 			// Unreachable (RFC 4443 §3.1) so it fails fast instead of
 			// waiting for a reply that will never come.
 			v6Type, v6Code := dialErrorToUnreachable(err)
 			s.sendUDPFlowUnreachable(flow.pool6Src, flow.key, v6Type, v6Code, err.Error(), logger)
-			// No session was stored yet (and none counted), so closing the
-			// gVisor endpoint is all the cleanup needed.
 			yggConn.Close()
 			return
 		}
 
-		logger.Debugf("NAT64 UDP %v.%d → %s",
-			net.IP(flow.key.srcAddr[:]).String(), flow.key.srcPort,
-			net.JoinHostPort(dstUDPAddr.IP.String(), strconv.Itoa(dstUDPAddr.Port)))
+		dstAddr := &net.UDPAddr{
+			IP:   net.IP(append([]byte(nil), flow.key.dstAddr[:]...)),
+			Port: int(flow.key.dstPort),
+		}
 
-		sess := &udpSession{outConn: conn4, conn6: yggConn}
-		if la, ok := conn4.LocalAddr().(*net.UDPAddr); ok && la.IP != nil {
-			copy(sess.localIP[:], la.IP.To4())
-			sess.localPort = uint16(la.Port)
+		logger.Debugf("NAT64 UDP %v.%d → %s via %s:%d",
+			net.IP(flow.key.srcAddr[:]).String(), flow.key.srcPort,
+			net.JoinHostPort(dstAddr.IP.String(), strconv.Itoa(dstAddr.Port)),
+			net.IP(bib.localIP[:]).String(), bib.localPort)
+
+		var dstCopy [4]byte
+		copy(dstCopy[:], flow.key.dstAddr[:])
+		sess := &udpSession{
+			bib:       bib,
+			conn6:     yggConn,
+			dst:       dstAddr,
+			dstAddr:   dstCopy,
+			localIP:   bib.localIP,
+			localPort: bib.localPort,
 		}
 		atomic.StoreInt64(&sess.lastSeenNs, time.Now().UnixNano())
 		if _, loaded := s.sessions.LoadOrStore(flow.key, sess); loaded {
 			// A stale map entry from a just-expired session of the same tuple
-			// still exists (its relay loops haven't deleted it yet). The live
+			// still exists (its forward loop hasn't deleted it yet). The live
 			// session is always the one whose gVisor endpoint is registered in
 			// the demuxer — i.e. this one — so replace the entry unconditionally.
-			// The stale loops exit on their closed conns and their deletes are
+			// The stale loops exit on their closed conn and their deletes are
 			// conditional (CompareAndDelete), so they cannot clobber ours; the
 			// occupancy counter is unchanged because the slot merely changes
 			// which session object it points at.
@@ -247,21 +388,30 @@ func (s *Service) handleUDPForward(req *udp.ForwarderRequest, logger *log.Logger
 			s.udpSessions.Add(1)
 			s.srcCounts.add(flow.key.srcAddr, srcUDP)
 		}
-		go s.udpReplyLoop(sess, flow.key)
+		// Register in the BIB's flow table BEFORE the forward loop starts so
+		// a fast reply can never outrun the demux entry it needs.
+		bib.flows.Store(v4Tuple{addr: dstCopy, port: flow.key.dstPort}, sess)
+		bib.touch()
 		go s.udpForwardLoop(sess, flow.key)
 	}()
 
 	return true
 }
 
-// udpForwardLoop pumps the client→server direction: datagrams read off the
-// gVisor endpoint are written to the connected OS udp4 socket.
+// udpForwardLoop pumps the client→server direction for one session: datagrams
+// read off the session's gVisor endpoint are written to the BIB's SHARED
+// socket with WriteToUDP. Every successful send refreshes both the session's
+// and the BIB's client-activity stamps (RFC 4787 REQ-5 / RFC 6146 §5.3:
+// inbound v4 traffic never extends the mapping).
 //
-// An ECONNREFUSED on Write means the kernel received an ICMPv4 Port
-// Unreachable for one of this flow's earlier datagrams; it is surfaced to the
-// client as ICMPv6 Destination Unreachable/port-unreachable (RFC 4443 §3.1)
-// and the loop keeps running — the error is consumed, later datagrams may
-// still succeed (e.g. a service restarting on the same port).
+// An ECONNREFUSED on Write means the kernel surfaced an ICMPv4 Port
+// Unreachable for an earlier datagram sent on this socket. With a shared BIB
+// socket it can no longer be attributed to one specific flow with certainty —
+// it is reported against the CURRENT flow (almost always the right one, since
+// refusals surface on the next send) as ICMPv6 Destination Unreachable /
+// port-unreachable (RFC 4443 §3.1), and the loop keeps running. The precise,
+// quote-based attribution path is icmperr.go, which demuxes by full tuple and
+// is unaffected by sharing.
 func (s *Service) udpForwardLoop(sess *udpSession, key sessionKey) {
 	defer s.deleteSession(sess, key)
 	buf := make([]byte, maxUDPDatagramSize)
@@ -270,67 +420,114 @@ func (s *Service) udpForwardLoop(sess *udpSession, key sessionKey) {
 		if err != nil {
 			return // endpoint closed by idle expiry, shutdown, or peer reset
 		}
-		atomic.StoreInt64(&sess.lastSeenNs, time.Now().UnixNano())
-		if _, err := sess.outConn.Write(buf[:n]); err != nil {
+		now := time.Now().UnixNano()
+		atomic.StoreInt64(&sess.lastSeenNs, now)
+		sess.bib.touch()
+		if _, err := sess.bib.uconn.WriteToUDP(buf[:n], sess.dst); err != nil {
 			if errors.Is(err, syscall.ECONNREFUSED) {
 				s.sendUDPPortRefused(sess, key, s.serviceLogger())
 				continue
 			}
 			return
 		}
-		atomic.StoreInt64(&sess.lastSeenNs, time.Now().UnixNano())
 	}
 }
 
-// udpReplyLoop pumps the server→client direction: replies read off the OS
-// udp4 socket are written into the gVisor endpoint, which routes them from
-// pool6::IPv4 back to the client (checksums and outbound IPv6 fragmentation
-// included). Oversized replies that previously could not be sent at all now
-// arrive fragmented and reassemble correctly on the client.
-//
-// Inbound v4 traffic deliberately does NOT refresh lastSeen (RFC 6146 §5.3,
-// RFC 4787 REQ-5): refreshing on received datagrams lets an attacker pin a
-// session — and its outbound socket — forever by pointing one datagram at a
-// chatty server. Session lifetime is bounded by client-side activity
-// (udpForwardLoop) plus this loop's server-silence deadline.
-//
-// Like the forward loop, ECONNREFUSED on Read (the kernel's report of a v4
-// Port Unreachable) is translated into an ICMPv6 port-unreachable for the
-// client instead of tearing the session down.
-func (s *Service) udpReplyLoop(sess *udpSession, key sessionKey) {
-	defer s.deleteSession(sess, key)
+// udpReplyLoop is the single reader of a BIB's shared socket. Every datagram
+// arriving on the NAT-assigned port is demuxed to a per-tuple session
+// (honouring the configured filtering behaviour) and relayed into its gVisor
+// endpoint, which routes it from pool6::serverIP back to the client
+// (checksums and outbound IPv6 fragmentation included).
+func (s *Service) udpReplyLoop(bib *udpBIB, bk bibKey) {
+	defer func() {
+		// If we exit because the socket was closed (idle expiry or shutdown),
+		// make sure the map entry goes too; CompareAndDelete keeps a freshly
+		// re-created BIB under the same key safe.
+		s.bibs.CompareAndDelete(bk, bib)
+	}()
 	buf := make([]byte, maxUDPDatagramSize)
+	lg := s.serviceLogger()
 	for {
-		// Rolling read deadline: a server gone silent for udpTimeout expires
-		// the session even if client traffic keeps flowing (matches the
-		// pre-forwarder behavior; RFC 4787 REQ-5 floor is deliberately not met
-		// — see README "Standards conformance").
-		_ = sess.outConn.SetReadDeadline(time.Now().Add(s.udpTimeout()))
-		n, err := sess.outConn.Read(buf)
+		n, raddr, err := bib.uconn.ReadFromUDP(buf)
 		if err != nil {
 			if errors.Is(err, syscall.ECONNREFUSED) {
-				s.sendUDPPortRefused(sess, key, s.serviceLogger())
+				// Kernel-reported port unreachable with no quotable victim;
+				// cannot be attributed to a flow on a shared socket.
+				if lg != nil {
+					lg.Debugf("NAT64 UDP port-unreachable on BIB %s:%d (unattributable)", net.IP(bib.localIP[:]), bib.localPort)
+				}
 				continue
 			}
-			return // timeout or connection closed
+			return // socket closed by idle expiry, shutdown, or fatal error
+		}
+		sess := s.demuxUDPReply(bib, raddr, lg)
+		if sess == nil {
+			continue // filtered: no matching flow under the current policy
 		}
 		if _, err := sess.conn6.Write(buf[:n]); err != nil {
-			return
+			continue // endpoint gone; its forward loop performs the teardown
 		}
 	}
 }
 
-// deleteSession tears down both legs of a session and removes its map entry.
-// The delete is conditional so a relay loop of a superseded stale session can
-// never remove the entry (or decrement the occupancy counter) of the live
-// session that replaced it.
+// demuxUDPReply finds the session a datagram arriving on a BIB's shared
+// socket belongs to, honouring the configured filtering behaviour
+// (RFC 6146 §5.2 / RFC 4787 REQ-8):
+//
+//   - exact match first: (server IP, server port) equal to an active flow of
+//     this BIB always delivers — every mode accepts true replies.
+//   - address-and-port-dependent: that is ALL that delivers; anything else
+//     is dropped (the pre-EIM connected-socket semantics).
+//   - address-dependent (default): a datagram from any port of an IPv4
+//     address this BIB has an active flow toward is accepted and delivered
+//     into that flow's session.
+//
+// A datagram matching no flow at all is dropped in every mode: endpoint-
+// independent filtering would require injecting packets onto the client leg
+// from sources the client never contacted, which is not implemented.
+func (s *Service) demuxUDPReply(bib *udpBIB, raddr *net.UDPAddr, lg *log.Logger) *udpSession {
+	var ip4 [4]byte
+	copy(ip4[:], raddr.IP.To4())
+	tuple := v4Tuple{addr: ip4, port: uint16(raddr.Port)}
+	if v, ok := bib.flows.Load(tuple); ok {
+		return v.(*udpSession)
+	}
+
+	if s.settings.Load().udpFiltering == filterAddressDependent {
+		var candidate *udpSession
+		bib.flows.Range(func(_, v any) bool {
+			sess := v.(*udpSession)
+			if sess.dstAddr == ip4 {
+				candidate = sess
+				return false
+			}
+			return true
+		})
+		if candidate != nil {
+			return candidate
+		}
+	}
+
+	if lg != nil {
+		lg.Debugf("NAT64 UDP filtered inbound %s:%d at %s:%d (no matching flow)",
+			raddr.IP.String(), raddr.Port, net.IP(bib.localIP[:]).String(), bib.localPort)
+	}
+	return nil
+}
+
+// deleteSession tears down a session's client-facing leg and removes its map
+// entries. The sessions delete is conditional so a relay loop of a superseded
+// stale session can never remove the entry (or decrement the occupancy
+// counter) of the live session that replaced it; the same guard protects the
+// BIB's per-flow table entry.
 func (s *Service) deleteSession(sess *udpSession, key sessionKey) {
 	sess.conn6.Close()
-	if sess.outConn != nil {
-		sess.outConn.Close()
-	}
 	if s.sessions.CompareAndDelete(key, sess) {
 		s.udpSessions.Add(-1)
 		s.srcCounts.remove(key.srcAddr, srcUDP)
+		if sess.bib != nil {
+			tuple := v4Tuple{addr: key.dstAddr, port: key.dstPort}
+			sess.bib.flows.CompareAndDelete(tuple, sess)
+		}
 	}
 }

@@ -41,6 +41,7 @@ type NAT64Config struct {
 	Pool6                   string
 	UDPTimeout              int
 	TCPTimeout              int
+	UDPFiltering            string
 	MaxTCPClients           int
 	MaxUDPSessions          int
 	MaxUDPSessionsPerSrc    int
@@ -103,6 +104,7 @@ type AppConfig struct {
 	Nat64Pool                 string       `json:"Nat64Pool"`
 	Nat64UdpTimeout           int          `json:"Nat64UdpTimeout"`
 	Nat64TcpTimeout           int          `json:"Nat64TcpTimeout"`
+	Nat64UdpFiltering         string       `json:"Nat64UdpFiltering"`
 	Nat64MaxTCPConnections    int          `json:"Nat64MaxTCPConnections"`
 	Nat64MaxUDPSessions       int          `json:"Nat64MaxUDPSessions"`
 	Nat64MaxUDPSessionsPerSrc int          `json:"Nat64MaxUDPSessionsPerSource"`
@@ -171,6 +173,7 @@ func (c *AppConfig) NAT64() NAT64Config {
 		Pool6:                   c.Nat64Pool,
 		UDPTimeout:              c.Nat64UdpTimeout,
 		TCPTimeout:              c.Nat64TcpTimeout,
+		UDPFiltering:            c.Nat64UdpFiltering,
 		MaxTCPClients:           c.Nat64MaxTCPConnections,
 		MaxUDPSessions:          c.Nat64MaxUDPSessions,
 		MaxUDPSessionsPerSrc:    c.Nat64MaxUDPSessionsPerSrc,
@@ -264,6 +267,21 @@ func (c *AppConfig) Validate() error {
 			c.Nat64TcpTimeout = DefaultNat64TcpTimeout
 		} else if c.Nat64TcpTimeout < DefaultNat64TcpTimeout {
 			return fmt.Errorf("Nat64TcpTimeout must not be less than %d seconds (2h04m, RFC 5382 REQ-5)", DefaultNat64TcpTimeout)
+		}
+		if c.Nat64UdpFiltering == "" {
+			c.Nat64UdpFiltering = "address-dependent"
+		} else {
+			c.Nat64UdpFiltering = strings.ToLower(c.Nat64UdpFiltering)
+			switch c.Nat64UdpFiltering {
+			case "address-dependent", "address-and-port-dependent":
+				// RFC 6146 §5.2's mandated default and the stricter
+				// pre-EIM behaviour. "endpoint-independent" (RFC 4787
+				// REQ-8's other option) is not implemented: delivering
+				// datagrams from never-contacted sources would require
+				// raw injection onto the client leg.
+			default:
+				return fmt.Errorf(`Nat64UdpFiltering must be "address-dependent" or "address-and-port-dependent", got %q`, c.Nat64UdpFiltering)
+			}
 		}
 		if c.Nat64MaxTCPConnections <= 0 {
 			c.Nat64MaxTCPConnections = DefaultNat64MaxTCPConnections
