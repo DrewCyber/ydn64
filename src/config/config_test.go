@@ -330,6 +330,68 @@ func TestAppConfigValidate_UDPFiltering(t *testing.T) {
 
 // TestGenconfOutputPassesValidation guards against template drift: whatever
 // -genconf prints must always pass AppConfig.Validate as-is.
+func TestAppConfigValidate_PortParity(t *testing.T) {
+	tests := []struct {
+		name        string
+		val         string
+		expectErr   bool
+		expectedVal string
+	}{
+		{
+			name:        "Default when unset",
+			val:         "",
+			expectErr:   false,
+			expectedVal: "preserve",
+		},
+		{
+			name:        "preserve accepted",
+			val:         "preserve",
+			expectErr:   false,
+			expectedVal: "preserve",
+		},
+		{
+			name:        "Case-insensitive, normalised",
+			val:         "Do-Not-Preserve",
+			expectErr:   false,
+			expectedVal: "do-not-preserve",
+		},
+		{
+			name:        "DO-NOT-PRESERVE accepted",
+			val:         "DO-NOT-PRESERVE",
+			expectErr:   false,
+			expectedVal: "do-not-preserve",
+		},
+		{
+			name:      "Garbage rejected",
+			val:       "random-ports",
+			expectErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := nat64Base()
+			cfg.Nat64PortParity = tc.val
+			err := cfg.Validate()
+
+			if tc.expectErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got nil", tc.val)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.expectedVal != "" && cfg.Nat64PortParity != tc.expectedVal {
+				t.Errorf("expected Nat64PortParity to be %q, got %q", tc.expectedVal, cfg.Nat64PortParity)
+			}
+		})
+	}
+}
+
+// TestGenconfOutputPassesValidation guards against template drift: whatever
+// -genconf prints must always pass AppConfig.Validate as-is.
 func TestAppConfigValidate_AAAAExcludedSubnets(t *testing.T) {
 	tests := []struct {
 		name      string

@@ -45,6 +45,7 @@ type NAT64Config struct {
 	UDPTimeout              int
 	TCPTimeout              int
 	UDPFiltering            string
+	PortParity              string
 	MaxTCPClients           int
 	MaxUDPSessions          int
 	MaxUDPSessionsPerSrc    int
@@ -108,6 +109,7 @@ type AppConfig struct {
 	Nat64UdpTimeout           int          `json:"Nat64UdpTimeout"`
 	Nat64TcpTimeout           int          `json:"Nat64TcpTimeout"`
 	Nat64UdpFiltering         string       `json:"Nat64UdpFiltering"`
+	Nat64PortParity           string       `json:"Nat64PortParity"`
 	Nat64MaxTCPConnections    int          `json:"Nat64MaxTCPConnections"`
 	Nat64MaxUDPSessions       int          `json:"Nat64MaxUDPSessions"`
 	Nat64MaxUDPSessionsPerSrc int          `json:"Nat64MaxUDPSessionsPerSource"`
@@ -178,6 +180,7 @@ func (c *AppConfig) NAT64() NAT64Config {
 		UDPTimeout:              c.Nat64UdpTimeout,
 		TCPTimeout:              c.Nat64TcpTimeout,
 		UDPFiltering:            c.Nat64UdpFiltering,
+		PortParity:              c.Nat64PortParity,
 		MaxTCPClients:           c.Nat64MaxTCPConnections,
 		MaxUDPSessions:          c.Nat64MaxUDPSessions,
 		MaxUDPSessionsPerSrc:    c.Nat64MaxUDPSessionsPerSrc,
@@ -297,6 +300,20 @@ func (c *AppConfig) Validate() error {
 				// deliver to a mapped client; enables hole punching).
 			default:
 				return fmt.Errorf(`Nat64UdpFiltering must be "address-dependent", "address-and-port-dependent" or "endpoint-independent", got %q`, c.Nat64UdpFiltering)
+			}
+		}
+		if c.Nat64PortParity == "" {
+			// RFC 4787 REQ-3's SHOULD-default.
+			c.Nat64PortParity = "preserve"
+		} else {
+			c.Nat64PortParity = strings.ToLower(c.Nat64PortParity)
+			switch c.Nat64PortParity {
+			case "preserve", "do-not-preserve":
+				// REQ-3's two behaviours: the NAT-assigned external UDP
+				// port keeps the client source port's even/odd parity, or
+				// explicitly does not.
+			default:
+				return fmt.Errorf(`Nat64PortParity must be "preserve" or "do-not-preserve", got %q`, c.Nat64PortParity)
 			}
 		}
 		if c.Nat64MaxTCPConnections <= 0 {

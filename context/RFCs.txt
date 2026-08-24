@@ -4,9 +4,8 @@ ydn64 — RFC REFERENCE LIST
 Authoritative list of the RFCs that ydn64's NAT64 and DNS64 implementations
 are measured against, with current implementation status.
 
-Last reviewed: 2026-08-24 (RFC 7766 §6.2.1.1/§7 pipelined DoT processing,
-RFC 4787 REQ-8 endpoint-independent filtering, and RFC 6147 §5.1.4 AAAA
-exclusion set landed in one session)
+Last reviewed: 2026-08-24 (RFC 4787 REQ-3 UDP port parity preservation
+landed in one session)
 Documented deviations: README.md, "Standards conformance and deliberate deviations"
 
 DESIGN GOAL: ydn64 aims to work well for Yggdrasil clients, NOT to be a
@@ -177,7 +176,18 @@ RFC 4787 (BCP 127) — NAT Behavioral Requirements for Unicast UDP      [DONE]
     REQ-1 Endpoint-Independent Mapping (UDP): one BIB entry with one
           shared outbound socket per client (addr, port); same external
           ip:port toward every destination                              [DONE]
-    REQ-3 port parity / range preservation                            [TODO]
+    REQ-3 port parity / range preservation: Nat64PortParity defaults to
+          "preserve" (the REQ-3 SHOULD): a BIB's shared outbound socket is
+          bound with the client source port's parity (bounded probe loop,
+          best-effort fallback if no parity-matching ephemeral port can be
+          bound), so RTP/RTCP-style even/odd flow pairing survives the
+          translator. "do-not-preserve" keeps plain OS ephemeral assignment.
+          Adjacent-range preservation (consecutive client ports →
+          consecutive external ports) is not implemented: it cannot be
+          guaranteed by the one-shared-socket-per-client EIM model without
+          cross-BIB coordination; parity is what RFC 4961 media flows
+          actually depend on. Reloadable via SIGHUP, applies to mappings
+          created afterwards.                                       [DONE]
     REQ-5 mapping timer >= 2 min, default >= 5 min
          (default 300 s, Validate() floor 120 s); refreshed only by the
          client's outbound datagrams per REQ-5's own rule — inbound v4

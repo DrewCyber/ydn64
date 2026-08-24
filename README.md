@@ -317,7 +317,10 @@ via a raw socket. There is no IP-header translation anywhere in the path.
   follows RFC 4787 REQ-1 / RFC 6146 §5.2: one client socket keeps ONE external
   `ip:port` across ALL of its destinations (a single shared outbound socket
   per client), so STUN/ICE-based NAT traversal (WebRTC, QUIC, P2P hole
-  punching) works through `ydn64`'s NAT64. Which inbound IPv4 senders are
+  punching) works through `ydn64`'s NAT64. The external port also keeps the
+  client source port's even/odd parity by default (`Nat64PortParity:
+  "preserve"`, RFC 4787 REQ-3), which RTP/RTCP-style media flow pairing
+  expects; `"do-not-preserve"` opts out. Which inbound IPv4 senders are
   relayed back is configurable via `Nat64UdpFiltering`: `address-dependent`
   (the RFC 6146 §5.2-mandated default — any port of an already-contacted
   server IP), `address-and-port-dependent` (strictest; exact tuple only), or

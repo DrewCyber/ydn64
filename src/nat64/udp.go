@@ -110,6 +110,39 @@ func (m udpFilterMode) String() string {
 	}
 }
 
+// portParityMode selects how a BIB's NAT-assigned external UDP port relates
+// to the client's source port (RFC 4787 REQ-3).
+type portParityMode int
+
+const (
+	// parityPreserve (the REQ-3 SHOULD-default) allocates an external port
+	// with the SAME parity as the client's source port — even stays even,
+	// odd stays odd. Real-time media stacks rely on this: RTP/RTCP endpoint
+	// pairs (RFC 4961) and several games demultiplex their flows by port
+	// parity, and a NAT that flips parity breaks them.
+	parityPreserve portParityMode = iota
+	// parityDoNotPreserve takes the first kernel-assigned ephemeral port
+	// with no parity guarantee. RFC 4787 REQ-3 requires such a NAT to draw
+	// from a range that is not used for parity-preserving assignments;
+	// exactly one mode is ever active in a running process, so the plain
+	// ephemeral pool satisfies that by construction.
+	parityDoNotPreserve
+)
+
+func parsePortParity(s string) portParityMode {
+	if strings.EqualFold(strings.TrimSpace(s), "do-not-preserve") {
+		return parityDoNotPreserve
+	}
+	return parityPreserve // default, including unknown/empty values
+}
+
+func (m portParityMode) String() string {
+	if m == parityDoNotPreserve {
+		return "do-not-preserve"
+	}
+	return "preserve"
+}
+
 // udpSession tracks one client→destination flow through its BIB.
 //
 // The gVisor-side endpoint is registered in the stack's transport demuxer by
@@ -263,6 +296,62 @@ func probeRouteSourceIPv4(dst [4]byte, dstPort uint16) (net.IP, error) {
 	return src, nil
 }
 
+// bibParityAttempts bounds the parity-matching bind tries in listenBIBSocket
+// before falling back to whatever port the kernel handed out. With ~50% of
+// ephemeral ports matching any wanted parity, 8 tries leave a mismatch
+// probability below 0.5%.
+const bibParityAttempts = 8
+
+// listenBIBSocket binds the shared outbound UDP4 socket for a new BIB entry.
+// Its local port IS the NAT-assigned external port for every destination that
+// client talks to (RFC 4787 REQ-1), so its allocation honours the configured
+// Nat64PortParity behaviour (RFC 4787 REQ-3):
+//
+//   - "preserve" (the default): keep the client source port's parity. The
+//     kernel hands out ephemeral ports with arbitrary parity, so up to
+//     bibParityAttempts binds are made and the first parity match wins; each
+//     rejected candidate is closed again immediately (UDP has no TIME_WAIT,
+//     so this churns nothing). If no try matches within budget, the last
+//     successfully bound socket is used as-is — trading REQ-3's SHOULD for
+//     availability rather than failing the client's flow.
+//
+//   - "do-not-preserve": take the first kernel-assigned port.
+func (s *Service) listenBIBSocket(bindIP net.IP, clientPort uint16) (*net.UDPConn, error) {
+	if s.settings.Load().portParity != parityPreserve {
+		return net.ListenUDP("udp4", &net.UDPAddr{IP: bindIP})
+	}
+	want := clientPort & 1
+	var fallback *net.UDPConn
+	for attempt := 0; attempt < bibParityAttempts; attempt++ {
+		c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: bindIP})
+		if err != nil {
+			if fallback != nil {
+				// The probe loop hit bind errors after we already hold a
+				// usable socket (e.g. the ephemeral range ran dry): serve
+				// with it instead of dropping the flow over a lost parity
+				// bet.
+				return fallback, nil
+			}
+			return nil, err
+		}
+		port := uint16(0)
+		if la, ok := c.LocalAddr().(*net.UDPAddr); ok {
+			port = uint16(la.Port)
+		}
+		if port&1 == want {
+			return c, nil
+		}
+		if fallback != nil {
+			fallback.Close()
+		}
+		fallback = c
+	}
+	if l := s.serviceLogger(); l != nil {
+		l.Debugf("NAT64 UDP: no parity-matching port after %d binds; external parity will not match client port %d", bibParityAttempts, clientPort)
+	}
+	return fallback, nil
+}
+
 // getOrCreateBIB returns the BIB entry for the client socket identified by
 // key, creating (and starting the reply loop of) a fresh one on first use.
 // Concurrent creation for the same client is resolved by LoadOrStore: the
@@ -286,7 +375,7 @@ func (s *Service) getOrCreateBIB(key sessionKey) (*udpBIB, error) {
 	if err != nil {
 		return nil, err
 	}
-	uconn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: bindIP})
+	uconn, err := s.listenBIBSocket(bindIP, key.srcPort)
 	if err != nil {
 		return nil, err
 	}

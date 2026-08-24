@@ -129,6 +129,7 @@ type nat64Settings struct {
 	udpTimeout     time.Duration
 	tcpTimeout     time.Duration
 	udpFiltering   udpFilterMode
+	portParity     portParityMode
 	maxUDPSessions int64 // ≤0 = unlimited
 	// Per-source anti-abuse ceilings (RFC 6146 §5.3); ≤0 = unlimited.
 	maxUDPSessionsPerSrc int64
@@ -165,6 +166,7 @@ func NewService(cfg config.NAT64Config, allowedSources []string, ignoredDstSubne
 		udpTimeout:           time.Duration(cfg.UDPTimeout) * time.Second,
 		tcpTimeout:           time.Duration(cfg.TCPTimeout) * time.Second,
 		udpFiltering:         parseUDPFilterMode(cfg.UDPFiltering),
+		portParity:           parsePortParity(cfg.PortParity),
 		maxUDPSessions:       int64(cfg.MaxUDPSessions),
 		maxUDPSessionsPerSrc: int64(cfg.MaxUDPSessionsPerSrc),
 		maxTCPClientsPerSrc:  int64(cfg.MaxTCPConnectionsPerSrc),
@@ -173,11 +175,13 @@ func NewService(cfg config.NAT64Config, allowedSources []string, ignoredDstSubne
 }
 
 // Reload atomically replaces AllowedSources, IgnoredDstSubnets, Nat64UdpTimeout,
-// Nat64TcpTimeout, Nat64UdpFiltering, Nat64MaxUDPSessions and the per-source
-// anti-abuse ceilings with new values, e.g. in response to a SIGHUP-triggered
-// config reload. Safe to call concurrently with in-flight traffic; other
-// NAT64 settings (Nat64Pool, Nat64Enable, Nat64MaxTCPConnections) are not
-// reloadable and require a process restart to change.
+// Nat64TcpTimeout, Nat64UdpFiltering, Nat64PortParity, Nat64MaxUDPSessions and
+// the per-source anti-abuse ceilings with new values, e.g. in response to a
+// SIGHUP-triggered config reload. Safe to call concurrently with in-flight
+// traffic; other NAT64 settings (Nat64Pool, Nat64Enable,
+// Nat64MaxTCPConnections) are not reloadable and require a process restart to
+// change. Port parity applies to mappings created after the reload; existing
+// BIB sockets keep their allocated port until they expire.
 func (s *Service) Reload(cfg config.NAT64Config, allowedSources []string, ignoredDstSubnets []string) {
 	s.settings.Store(&nat64Settings{
 		allowedNets:          config.ParseAllowedNets(allowedSources),
@@ -185,6 +189,7 @@ func (s *Service) Reload(cfg config.NAT64Config, allowedSources []string, ignore
 		udpTimeout:           time.Duration(cfg.UDPTimeout) * time.Second,
 		tcpTimeout:           time.Duration(cfg.TCPTimeout) * time.Second,
 		udpFiltering:         parseUDPFilterMode(cfg.UDPFiltering),
+		portParity:           parsePortParity(cfg.PortParity),
 		maxUDPSessions:       int64(cfg.MaxUDPSessions),
 		maxUDPSessionsPerSrc: int64(cfg.MaxUDPSessionsPerSrc),
 		maxTCPClientsPerSrc:  int64(cfg.MaxTCPConnectionsPerSrc),
@@ -300,8 +305,8 @@ func (s *Service) Start(ctx context.Context, logger *log.Logger) {
 	go s.statsLoop(ctx, logger, statsInterval)
 
 	cur := s.settings.Load()
-	logger.Printf("NAT64 started  pool6=%s  udp_timeout=%s  tcp_timeout=%s  udp_filter=%s  sources=%v  icmp=%v",
-		s.pool6Net, cur.udpTimeout, cur.tcpTimeout, cur.udpFiltering, cur.allowedNets, s.icmpConn != nil)
+	logger.Printf("NAT64 started  pool6=%s  udp_timeout=%s  tcp_timeout=%s  udp_filter=%s  udp_port_parity=%s  sources=%v  icmp=%v",
+		s.pool6Net, cur.udpTimeout, cur.tcpTimeout, cur.udpFiltering, cur.portParity, cur.allowedNets, s.icmpConn != nil)
 }
 
 // interceptPacket dispatches a raw IPv6 packet from the NIC read path to the

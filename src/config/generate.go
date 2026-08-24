@@ -243,6 +243,16 @@ func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string, peers, allowed
 	sb.WriteString("  # Reloadable via SIGHUP.\n")
 	sb.WriteString("  Nat64UdpFiltering: \"address-dependent\"\n\n")
 
+	sb.WriteString("  # How the NAT-assigned external UDP port relates to the client's\n")
+	sb.WriteString("  # source port (RFC 4787 REQ-3):\n")
+	sb.WriteString("  #   \"preserve\" (default) - the external port keeps the client\n")
+	sb.WriteString("  #     source port's even/odd parity, as real-time media flows\n")
+	sb.WriteString("  #     expect (RTP/RTCP endpoint pairs, RFC 4961).\n")
+	sb.WriteString("  #   \"do-not-preserve\" - no parity guarantee.\n")
+	sb.WriteString("  # Reloadable via SIGHUP (affects mappings created afterwards;\n")
+	sb.WriteString("  # existing mappings keep their port until they expire).\n")
+	sb.WriteString("  Nat64PortParity: \"preserve\"\n\n")
+
 	sb.WriteString("  # Idle timeout in seconds before an idle-but-alive proxied TCP\n")
 	sb.WriteString("  # connection is expired and both legs are closed (freeing its\n")
 	sb.WriteString("  # connection slots). Refreshed by payload traffic in either\n")

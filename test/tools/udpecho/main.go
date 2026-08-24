@@ -20,14 +20,16 @@
 //
 // One-shot client mode:
 //
-//	udpecho -once <server-addr> <infile> <outfile>
+//	udpecho -once [-sport <port>] <server-addr> <infile> <outfile>
 //
 // Sends the contents of infile as ONE datagram to server-addr, waits up to
 // 10 seconds for a reply, writes it verbatim to outfile, and exits non-zero
 // on any failure (timeout, short reply, write error). Cases then compare
 // checksums/lengths of infile vs outfile to prove end-to-end integrity
 // across fragmented datagrams. (A -tag-client prefix is tolerated and
-// stripped before writing.)
+// stripped before writing; when present, the observed client address is
+// additionally logged as "MAPPING client=<ip>:<port>" so a case can assert
+// properties of the NAT-assigned external port, e.g. RFC 4787 REQ-3 parity.)
 //
 // EIM probe client mode (endpoint-independent mapping check):
 //
@@ -119,7 +121,7 @@ func runServer(addr string, tagClient bool) {
 	}
 }
 
-func runClient(server, inFile, outFile string) {
+func runClient(server, inFile, outFile string, sport int) {
 	payload, err := os.ReadFile(inFile)
 	if err != nil {
 		log.Fatalf("udpecho: read %s: %v", inFile, err)
@@ -132,7 +134,11 @@ func runClient(server, inFile, outFile string) {
 	if err != nil {
 		log.Fatalf("udpecho: resolve %s: %v", server, err)
 	}
-	conn, err := net.DialUDP("udp", nil, raddr)
+	var laddr *net.UDPAddr
+	if sport != 0 {
+		laddr = &net.UDPAddr{Port: sport} // pin the client source port (parity probes)
+	}
+	conn, err := net.DialUDP("udp", laddr, raddr)
 	if err != nil {
 		log.Fatalf("udpecho: dial: %v", err)
 	}
@@ -149,8 +155,9 @@ func runClient(server, inFile, outFile string) {
 		log.Fatalf("udpecho: no reply within %v: %v", replyTimeout, err)
 	}
 	body := buf[:n]
-	if _, b, ok := splitTag(body); ok {
+	if tag, b, ok := splitTag(body); ok {
 		body = b // tolerate a tagged responder in plain mode too
+		log.Printf("udpecho: MAPPING %s", tag)
 	}
 	if len(body) != len(payload) {
 		log.Fatalf("udpecho: short reply: got %d bytes, want %d", len(body), len(payload))
@@ -245,6 +252,7 @@ func runEIMClient(serverA, serverB, inFile, outFileA, outFileB string) {
 
 func main() {
 	once := flag.Bool("once", false, "one-shot client mode")
+	sport := flag.Int("sport", 0, "once mode: pin the client source port to this value (0 = ephemeral)")
 	eim := flag.Bool("eim", false, "EIM probe client mode: <srv1> <srv2> <infile> <out1> <out2>")
 	eif := flag.Bool("eif", false, "EIF probe+receiver mode: <server> <wait-secs> <infile> <outfile>")
 	send := flag.Bool("send", false, "fire-and-forget sender: [-bind ip] <target> <infile>")
@@ -256,7 +264,7 @@ func main() {
 	case !*once && !*eim && !*eif && !*send && flag.NArg() == 1:
 		runServer(flag.Arg(0), *tagClient)
 	case *once && flag.NArg() == 3:
-		runClient(flag.Arg(0), flag.Arg(1), flag.Arg(2))
+		runClient(flag.Arg(0), flag.Arg(1), flag.Arg(2), *sport)
 	case *eim && flag.NArg() == 5:
 		runEIMClient(flag.Arg(0), flag.Arg(1), flag.Arg(2), flag.Arg(3), flag.Arg(4))
 	case *eif && flag.NArg() == 4:
