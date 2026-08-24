@@ -115,19 +115,27 @@ func TestCountSyncMap(t *testing.T) {
 	}
 }
 
-// lastUDPRx parses the trailing " udpRx=<n>" out of the newest stats line.
+// lastUDPRx reports whether ANY stats line recorded a positive udpRx delta.
+// Deltas reset to zero on the tick after traffic, so scanning every line —
+// not just the newest — is what makes this race-free under scheduler load:
+// once a positive delta is logged it stays visible in the buffer.
 func lastUDPRx(buf string) (int, bool) {
-	idx := strings.LastIndex(buf, " udpRx=")
-	if idx < 0 {
-		return 0, false
+	best := 0
+	rest := buf
+	for {
+		idx := strings.Index(rest, " udpRx=")
+		if idx < 0 {
+			return best, best > 0
+		}
+		rest = rest[idx+len(" udpRx="):]
+		end := strings.IndexAny(rest, " \n")
+		if end < 0 {
+			end = len(rest)
+		}
+		if n, err := strconv.Atoi(rest[:end]); err == nil && n > best {
+			best = n
+		}
 	}
-	rest := buf[idx+len(" udpRx="):]
-	end := strings.IndexAny(rest, " \n")
-	if end < 0 {
-		end = len(rest)
-	}
-	n, err := strconv.Atoi(rest[:end])
-	return n, err == nil
 }
 
 // syncBuf is a mutex-guarded buffer: the stats loop logs into it from its

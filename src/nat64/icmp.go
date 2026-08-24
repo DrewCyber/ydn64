@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gologme/log"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 )
@@ -199,7 +200,9 @@ func (s *Service) registerICMPSession(srcAddr, pool6Src [16]byte, dstIPv4 [4]byt
 
 // forwardICMP sends a translated ICMPv4 Echo Request to the real IPv4
 // destination via the shared raw socket, using the session's NAT-assigned
-// identifier in place of the client's.
+// identifier in place of the client's. A local-level send failure (no route,
+// permissions) is reported back to the client as an ICMPv6 Destination
+// Unreachable (RFC 4443 §3.1) quoting the original request.
 func (s *Service) forwardICMP(sess *icmpSession, dstIPv4 [4]byte, seq uint16, data []byte) {
 	conn := s.icmpConn
 	if conn == nil {
@@ -214,15 +217,36 @@ func (s *Service) forwardICMP(sess *icmpSession, dstIPv4 [4]byte, seq uint16, da
 	if err != nil {
 		return
 	}
-	_, _ = conn.WriteTo(b, &net.IPAddr{IP: net.IP(dstIPv4[:])})
+	if _, err := conn.WriteTo(b, &net.IPAddr{IP: net.IP(dstIPv4[:])}); err == nil {
+		return
+	} else if logger := s.logger.Load(); logger != nil && s.errLim.allow(time.Now()) {
+		l4 := make([]byte, 8+len(data))
+		l4[0], l4[1] = 128, 0 // the client's original Echo Request header
+		binary.BigEndian.PutUint16(l4[4:6], sess.clientID)
+		binary.BigEndian.PutUint16(l4[6:8], seq)
+		copy(l4[8:], data)
+		pkt := buildIPv6ICMPErrorPacket(
+			sess.pool6Src[:], sess.yggDst[:],
+			1, 0, 0,
+			sess.yggDst[:], sess.pool6Src[:],
+			64, 58,
+			l4,
+		)
+		if _, err := s.ns.WritePacket(pkt); err == nil {
+			logger.Debugf("NAT64 ICMP echo toward %s undeliverable (%v); client notified", net.IP(dstIPv4[:]), err)
+		}
+	}
 }
 
 // icmpReplyLoop continuously reads ICMPv4 messages off the single shared raw
-// socket and translates Echo Replies back into synthesised IPv6 ICMPv6 Echo
-// Replies, looking up the originating session by (reply source IPv4,
-// NAT-assigned identifier).
-func (s *Service) icmpReplyLoop() {
-	buf := make([]byte, int(s.ns.MTU()))
+// socket. Echo Replies are translated back into ICMPv6 Echo Replies for the
+// originating client; error classes (Destination Unreachable, Time Exceeded,
+// Parameter Problem, ...) go through handleICMPv4Error, which demuxes them
+// against live NAT64 sessions (RFC 7915 §4.2/§4.3). Messages that match
+// neither — including errors about unrelated host traffic the raw socket
+// observes — are ignored.
+func (s *Service) icmpReplyLoop(logger *log.Logger) {
+	buf := make([]byte, icmpReadBufSize)
 	for {
 		conn := s.icmpConn
 		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
@@ -233,6 +257,9 @@ func (s *Service) icmpReplyLoop() {
 			}
 			continue // timeout or transient error — keep polling
 		}
+		if n < 8 {
+			continue
+		}
 
 		ipAddr, ok := peer.(*net.IPAddr)
 		if !ok {
@@ -242,19 +269,22 @@ func (s *Service) icmpReplyLoop() {
 		if ip4 == nil {
 			continue
 		}
-
-		msg, err := icmp.ParseMessage(1 /* IANA ICMP protocol number */, buf[:n])
-		if err != nil || msg.Type != ipv4.ICMPTypeEchoReply {
-			continue
-		}
-		echo, ok := msg.Body.(*icmp.Echo)
-		if !ok {
-			continue
-		}
-
 		var srcAddr [4]byte
 		copy(srcAddr[:], ip4)
-		s.translateICMPv4Reply(srcAddr, echo)
+
+		if buf[0] == byte(ipv4.ICMPTypeEchoReply) {
+			msg, err := icmp.ParseMessage(1 /* IANA ICMP protocol number */, buf[:n])
+			if err != nil {
+				continue
+			}
+			echo, ok := msg.Body.(*icmp.Echo)
+			if !ok {
+				continue
+			}
+			s.translateICMPv4Reply(srcAddr, echo)
+			continue
+		}
+		s.handleICMPv4Error(srcAddr, buf[:n], logger)
 	}
 }
 

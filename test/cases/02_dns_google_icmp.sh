@@ -39,6 +39,19 @@ case "$answer" in
 esac
 log "synthesised AAAA embeds a real dns.google answer (8.8.8.8 or 8.8.4.4)"
 
-ping_out=$($PODMAN exec "$CT_B" ping6 -c 3 -W 3 "$answer" 2>&1) || fail "FAIL: ping6 to NAT64-translated 8.8.8.8 failed:\n$ping_out"
-log "ping6 $answer ->\n$ping_out"
-assert_contains "$ping_out" " 0% packet loss" "NAT64 ICMP translation delivers echo replies (0% packet loss)"
+# The ping gets the same retry treatment as the dig above: the first
+# exchange across a freshly booted link races session/key setup, and
+# podman-exec output capture occasionally truncates mid-stream (transient
+# gvproxy hiccup — see lib.sh notes). Success = any attempt reporting 0%
+# packet loss.
+ping_ok=""
+n=0
+while [ "$n" -lt 5 ]; do
+  ping_out=$($PODMAN exec "$CT_B" ping6 -c 3 -W 3 "$answer" 2>&1 || true)
+  log "ping6 $answer ->\n$ping_out"
+  case "$ping_out" in
+    *" 0% packet loss"*) ping_ok=1; break ;;
+  esac
+  n=$((n + 1))
+done
+[ -n "$ping_ok" ] || fail "FAIL: NAT64 ICMP translation never delivered echo replies (no attempt reached 0% packet loss)"

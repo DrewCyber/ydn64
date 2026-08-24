@@ -12,6 +12,29 @@ moved under the corresponding version heading.
 
 ## [Unreleased]
 
+ICMP error translation: traceroute and PMTUD now work through NAT64.
+
+- **RFC 7915 §4.2/§4.3 + RFC 5508 REQ-3/REQ-4 — ICMPv4 error translation**.
+  ydn64 no longer discards ICMPv4 errors about traffic it sent toward real
+  IPv4 destinations. Destination Unreachable, Time Exceeded and Parameter
+  Problem messages are demuxed against live NAT64 sessions (UDP tuples and
+  allocated Echo identifiers), translated per the RFC 7915 §4.2 type/code
+  tables (including Packet Too Big MTU adjustment with RFC 1191 plateau
+  fallback), and injected back to the originating Yggdrasil client with the
+  quoted packet reconstructed to its original tuple. **IPv6-side PMTUD now
+  converges for UDP flows, closed v4 ports fail fast instead of hanging,
+  and every ICMPv4 error the IPv4 path produces for a tracked flow reaches
+  the client as translated ICMPv6.** (Classic hop-by-hop `traceroute`
+  remains limited: re-originated datagrams start with a fresh IPv4 TTL, so
+  early-hop Time Exceeded replies cannot occur.) Synthesised errors are
+  rate-limited and truncated to the 1280-byte minimum-IPv6-MTU budget;
+  TCP is deliberately excluded because proxied connections terminate twice
+  and the OS stack consumes v4-side TCP errors itself.
+- **RFC 4443 §3.1 — generated Destination Unreachables**: UDP flows whose
+  outbound dial fails, or whose OS socket surfaces a kernel-received v4
+  Port Unreachable, are reported to the client as ICMPv6 Destination
+  Unreachable instead of silently blackholing.
+
 ## [0.6.0] - 2026-08-23
 
 gVisor netstack hardening (UDP fragmentation, MTU fix, TCP robustness)

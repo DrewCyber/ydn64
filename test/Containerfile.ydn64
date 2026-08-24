@@ -8,13 +8,18 @@ RUN go mod download
 COPY cmd ./cmd
 COPY src ./src
 RUN CGO_ENABLED=0 go build -o /out/ydn64 ./cmd/ydn64
-# Test-only helper (see test/tools/udpecho): a dependency-free UDP echo
-# server used by cases that need payloads larger than busybox nc can handle.
+# Test-only helpers (see test/tools/): udpecho is a dependency-free UDP echo
+# server for cases that need payloads larger than busybox nc can handle;
+# icmperr answers UDP probes with crafted ICMPv4 errors (time exceeded /
+# fragmentation needed) so NAT64 ICMP error translation can be tested
+# deterministically against loopback instead of real-internet routers.
 COPY test/tools ./test/tools
-RUN CGO_ENABLED=0 go build -o /out/udpecho ./test/tools/udpecho
+RUN CGO_ENABLED=0 go build -o /out/udpecho ./test/tools/udpecho && \
+    CGO_ENABLED=0 go build -o /out/icmperr ./test/tools/icmperr
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 COPY --from=build /out/ydn64 /usr/local/bin/ydn64
 COPY --from=build /out/udpecho /usr/local/bin/udpecho
+COPY --from=build /out/icmperr /usr/local/bin/icmperr
 ENTRYPOINT ["/usr/local/bin/ydn64"]

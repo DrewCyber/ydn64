@@ -1,10 +1,12 @@
 package nat64
 
 import (
+	"errors"
 	"math"
 	"net"
 	"strconv"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/gologme/log"
@@ -31,9 +33,15 @@ type sessionKey struct {
 // pre-queues — is delivered directly to conn6 without any manual demuxing
 // here. The sync.Map entry only serves idle-expiry bookkeeping and gives the
 // reply loop access to both legs.
+//
+// localIP/localPort record the OS socket's own address once assigned by the
+// kernel; ICMPv4 errors quoting that tuple are demuxed back to this session
+// for translation (see icmperr.go).
 type udpSession struct {
 	outConn    *net.UDPConn   // connected UDP4 socket to the real IPv4 server
 	conn6      *gonet.UDPConn // connected gVisor UDP endpoint on the Yggdrasil leg
+	localIP    [4]byte        // outbound socket's source address on the IPv4 side
+	localPort  uint16         // outbound socket's NAT-assigned port
 	lastSeenNs int64          // Unix nanosecond timestamp, updated atomically
 }
 
@@ -196,6 +204,11 @@ func (s *Service) handleUDPForward(req *udp.ForwarderRequest, logger *log.Logger
 		conn4, err := net.DialUDP("udp4", nil, dstUDPAddr)
 		if err != nil {
 			logger.Debugf("NAT64 UDP dial %s: %v", dstUDPAddr, err)
+			// Report the failure to the client as an ICMPv6 Destination
+			// Unreachable (RFC 4443 §3.1) so it fails fast instead of
+			// waiting for a reply that will never come.
+			v6Type, v6Code := dialErrorToUnreachable(err)
+			s.sendUDPFlowUnreachable(flow.pool6Src, flow.key, v6Type, v6Code, err.Error(), logger)
 			// No session was stored yet (and none counted), so closing the
 			// gVisor endpoint is all the cleanup needed.
 			yggConn.Close()
@@ -207,6 +220,10 @@ func (s *Service) handleUDPForward(req *udp.ForwarderRequest, logger *log.Logger
 			net.JoinHostPort(dstUDPAddr.IP.String(), strconv.Itoa(dstUDPAddr.Port)))
 
 		sess := &udpSession{outConn: conn4, conn6: yggConn}
+		if la, ok := conn4.LocalAddr().(*net.UDPAddr); ok && la.IP != nil {
+			copy(sess.localIP[:], la.IP.To4())
+			sess.localPort = uint16(la.Port)
+		}
 		atomic.StoreInt64(&sess.lastSeenNs, time.Now().UnixNano())
 		if _, loaded := s.sessions.LoadOrStore(flow.key, sess); loaded {
 			// A stale map entry from a just-expired session of the same tuple
@@ -230,6 +247,12 @@ func (s *Service) handleUDPForward(req *udp.ForwarderRequest, logger *log.Logger
 
 // udpForwardLoop pumps the client→server direction: datagrams read off the
 // gVisor endpoint are written to the connected OS udp4 socket.
+//
+// An ECONNREFUSED on Write means the kernel received an ICMPv4 Port
+// Unreachable for one of this flow's earlier datagrams; it is surfaced to the
+// client as ICMPv6 Destination Unreachable/port-unreachable (RFC 4443 §3.1)
+// and the loop keeps running — the error is consumed, later datagrams may
+// still succeed (e.g. a service restarting on the same port).
 func (s *Service) udpForwardLoop(sess *udpSession, key sessionKey) {
 	defer s.deleteSession(sess, key)
 	buf := make([]byte, maxUDPDatagramSize)
@@ -240,6 +263,10 @@ func (s *Service) udpForwardLoop(sess *udpSession, key sessionKey) {
 		}
 		atomic.StoreInt64(&sess.lastSeenNs, time.Now().UnixNano())
 		if _, err := sess.outConn.Write(buf[:n]); err != nil {
+			if errors.Is(err, syscall.ECONNREFUSED) {
+				s.sendUDPPortRefused(sess, key, s.serviceLogger())
+				continue
+			}
 			return
 		}
 		atomic.StoreInt64(&sess.lastSeenNs, time.Now().UnixNano())
@@ -251,6 +278,10 @@ func (s *Service) udpForwardLoop(sess *udpSession, key sessionKey) {
 // pool6::IPv4 back to the client (checksums and outbound IPv6 fragmentation
 // included). Oversized replies that previously could not be sent at all now
 // arrive fragmented and reassemble correctly on the client.
+//
+// Like the forward loop, ECONNREFUSED on Read (the kernel's report of a v4
+// Port Unreachable) is translated into an ICMPv6 port-unreachable for the
+// client instead of tearing the session down.
 func (s *Service) udpReplyLoop(sess *udpSession, key sessionKey) {
 	defer s.deleteSession(sess, key)
 	buf := make([]byte, maxUDPDatagramSize)
@@ -262,6 +293,10 @@ func (s *Service) udpReplyLoop(sess *udpSession, key sessionKey) {
 		_ = sess.outConn.SetReadDeadline(time.Now().Add(s.udpTimeout()))
 		n, err := sess.outConn.Read(buf)
 		if err != nil {
+			if errors.Is(err, syscall.ECONNREFUSED) {
+				s.sendUDPPortRefused(sess, key, s.serviceLogger())
+				continue
+			}
 			return // timeout or connection closed
 		}
 		atomic.StoreInt64(&sess.lastSeenNs, time.Now().UnixNano())

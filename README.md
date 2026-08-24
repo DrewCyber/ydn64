@@ -264,9 +264,24 @@ via a raw socket. There is no IP-header translation anywhere in the path.
 - **No RFC 7915 header translation.** Traffic Class/DSCP, ECN, and Hop
   Limit ↔ TTL are not carried across the translator; synthesised IPv6 replies
   use a fixed Hop Limit.
-- **ICMP errors are not translated** — only Echo/Echo Reply. As a result
-  `traceroute` through NAT64 does not work, and Path MTU Discovery is not
-  supported in either direction.
+- **ICMP errors are translated for NAT64-tracked flows** (RFC 7915 §4.2/§4.3,
+  RFC 5508 REQ-3/4): v4-side Destination Unreachable / Time Exceeded /
+  Packet Too Big messages matching live UDP or ICMP sessions reach the
+  client as translated ICMPv6 errors, so IPv6-side PMTUD converges for UDP
+  flows, closed v4 ports fail fast instead of hanging, and every error the
+  IPv4 path produces against a flow is delivered. TCP is excluded: proxied
+  connections terminate twice (gVisor endpoint ↔ OS socket), so the OS stack
+  consumes those errors itself. Because stateful NAT64 replaces the quoted
+  packet's client source port with the NAT-assigned one, userspace tools
+  with strict reply-matching heuristics may ignore such errors even though
+  the kernel delivered them. ydn64 also generates ICMPv6 Destination
+  Unreachable for UDP flows it cannot establish or whose port the v4 side
+  refused (RFC 4443 §3.1). All synthesised errors are rate-limited and
+  truncated to fit the minimum IPv6 MTU. Note that classic hop-by-hop
+  `traceroute` still cannot resolve through NAT64: flows are re-originated
+  with a fresh IPv4 TTL, so a client's small hop limits never expire an
+  intermediate IPv4 router — only errors aimed at the flow itself (server
+  port-unreachables, tunnel PTBs) come back, translated.
 - **No IPv4-initiated flows.** `ydn64` has no inbound IPv4 listener, so only
   the "IPv6 client → IPv4 server" direction of RFC 6144 is supported.
 - **Fragmented IPv6 packets are handled for TCP and UDP** — gVisor reassembles

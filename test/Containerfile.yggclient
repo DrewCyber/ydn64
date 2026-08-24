@@ -19,7 +19,10 @@ RUN printf 'module udpecho\n\ngo 1.25\n' > go.mod && \
     CGO_ENABLED=0 go build -o /out/udpecho ./tools/udpecho
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates bind-tools curl iproute2 tcpdump iputils
+# traceroute: exercises NAT64 ICMP error translation from the client side
+# (time exceeded / port unreachable handling); tcpdump: asserts on ICMPv6
+# Packet Too Big arriving over ygg0 in case 09.
+RUN apk add --no-cache ca-certificates bind-tools curl iproute2 tcpdump iputils traceroute
 COPY --from=build /go/bin/yggdrasil /go/bin/yggdrasilctl /usr/local/bin/
 COPY --from=build /out/udpecho /usr/local/bin/udpecho
 COPY yggclient-entrypoint.sh /entrypoint.sh

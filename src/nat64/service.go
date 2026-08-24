@@ -68,6 +68,13 @@ type Service struct {
 	icmpCount    atomic.Int64
 	icmpClosed   atomic.Bool
 
+	// errLim rate-limits every synthesised ICMPv6 error (translated v4-side
+	// errors and generated Destination Unreachables alike).
+	errLim errRateLimiter
+	// logger is the service log target captured at Start; packet-path hooks
+	// (the NIC interceptor runs without arguments) use it for debug lines.
+	logger atomic.Pointer[log.Logger]
+
 	// statsMu guards lastStatSnap, shared by the periodic stats loop and
 	// on-demand dumps (SIGHUP) so their lines partition time cleanly.
 	statsMu      sync.Mutex
@@ -149,6 +156,10 @@ func (s *Service) udpTimeout() time.Duration {
 	return s.settings.Load().udpTimeout
 }
 
+// serviceLogger returns the log target captured at Start; nil before Start,
+// which relay loops and hook paths treat as "skip debug logging".
+func (s *Service) serviceLogger() *log.Logger { return s.logger.Load() }
+
 // tryAcquireTCP reports whether a new proxied TCP connection may start.
 // Always true when no limit is configured.
 func (s *Service) tryAcquireTCP() bool {
@@ -219,8 +230,10 @@ func (s *Service) Start(ctx context.Context, logger *log.Logger) {
 		logger.Printf("NAT64 ICMP disabled (raw socket unavailable, needs CAP_NET_RAW): %v", err)
 	} else {
 		s.icmpConn = conn
-		go s.icmpReplyLoop()
+		go s.icmpReplyLoop(logger)
 	}
+
+	s.logger.Store(logger)
 
 	// ── ICMP: NIC-level packet interceptor ───────────────────────────────────
 	s.ns.SetPacketInterceptor(s.interceptPacket)
