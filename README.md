@@ -295,9 +295,12 @@ via a raw socket. There is no IP-header translation anywhere in the path.
   port-unreachables, tunnel PTBs) come back, translated.
 - **No IPv4-initiated flows.** `ydn64` has no inbound IPv4 listener, so only
   the "IPv6 client → IPv4 server" direction of RFC 6144 is supported.
-- **Fragmented IPv6 packets are handled for TCP and UDP** — gVisor reassembles
-  inbound fragments and fragments oversized outbound datagrams. The raw-socket
-  ICMP Echo path still only sees unfragmented echo requests (RFC 6146 §3.4).
+- **Fragmented IPv6 packets are handled on every path** — gVisor reassembles
+  inbound TCP/UDP fragments and fragments oversized outbound datagrams; the
+  intercepted ICMPv6 path walks extension-header chains, reassembles
+  fragmented Echo Requests in a bounded table (≤64 datagrams, ≤16 fragments
+  each, ≤64 KiB total, 30 s lifetime), and emits oversized replies as proper
+  IPv6 fragments (RFC 8200 §4.5, RFC 6146 §3.4).
 - **Mapping is address-and-port-dependent ("symmetric NAT").** RFC 6146 §5.2
   requires Endpoint-Independent Mapping; `ydn64` opens a separate outbound
   socket per destination, so a client's external port differs per peer. This

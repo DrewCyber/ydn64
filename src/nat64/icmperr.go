@@ -384,9 +384,20 @@ func (s *Service) translateUDPQuotedError(srcV4 [4]byte, inner icmpInnerPacket, 
 	})
 	if sess == nil {
 		n := 0
-		s.sessions.Range(func(_, _ any) bool { n++; return true })
-		logger.Debugf("NAT64 ICMP err demux miss (%d live UDP sessions): quoted %s:%d → %s:%d",
-			n, net.IP(inner.src[:]), quotedSport, net.IP(inner.dst[:]), quotedDport)
+		s.sessions.Range(func(k, v any) bool {
+			sk := k.(sessionKey)
+			ss := v.(*udpSession)
+			logger.Debugf("NAT64 ICMP err demux miss: live %v.%d local=%s:%d vs quoted %s:%d → %s:%d",
+				net.IP(sk.srcAddr[:]), sk.srcPort,
+				net.IP(ss.localIP[:]), ss.localPort,
+				net.IP(inner.src[:]), quotedSport, net.IP(inner.dst[:]), quotedDport)
+			n++
+			return true
+		})
+		if n == 0 {
+			logger.Debugf("NAT64 ICMP err demux miss: no live UDP sessions (quoted %s:%d → %s:%d)",
+				net.IP(inner.src[:]), quotedSport, net.IP(inner.dst[:]), quotedDport)
+		}
 		return
 	}
 

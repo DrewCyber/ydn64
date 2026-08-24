@@ -70,20 +70,18 @@ type icmpSession struct {
 }
 
 // interceptICMPPacket is installed (via interceptPacket) as part of the
-// NIC-level packet interceptor. It runs in the NIC read goroutine; pkt is
-// valid only for the duration of this call.
+// NIC read path. It consumes Echo Requests addressed to pool6 destinations —
+// including those arriving behind IPv6 extension headers or as fragments
+// (RFC 8200 §4.5, RFC 6146 §3.4) — and lets everything else reach gVisor.
 func (s *Service) interceptICMPPacket(pkt []byte) bool {
 	// Minimum: 40 (IPv6 header) + 8 (ICMPv6 echo header) = 48 bytes.
 	if len(pkt) < 48 {
 		return false
 	}
-	if pkt[0]>>4 != 6 {
-		return false
-	}
-	if pkt[6] != 58 { // ICMPv6
-		return false
-	}
-	if pkt[40] != 128 { // Echo Request only; everything else (NDP, etc.) passes to gVisor
+	info, status := parseIPv6HeaderChain(pkt)
+	if status != chainICMPv6 {
+		// Other protocols belong to their own forwarders; malformed chains
+		// are dropped by the same fall-through (gVisor discards them).
 		return false
 	}
 	dstIP := net.IP(pkt[24:40])
@@ -111,33 +109,86 @@ func (s *Service) interceptICMPPacket(pkt []byte) bool {
 	copy(srcAddr[:], pkt[8:24])
 	copy(pool6Src[:], pkt[24:40]) // destination = pool6::IPv4 → becomes reply source
 
-	id := binary.BigEndian.Uint16(pkt[44:46])
-	seq := binary.BigEndian.Uint16(pkt[46:48])
-
 	var dstIPv4 [4]byte
 	copy(dstIPv4[:], pkt[36:40]) // last 4 bytes of pool6 destination = embedded IPv4
 	if s.isIgnoredDst(net.IP(dstIPv4[:])) {
 		return true // consumed (dropped)
 	}
 
-	// Inbound validation before anything is relayed toward the IPv4
-	// internet (forwarded TCP/UDP are already structurally validated by
-	// gVisor; this raw path is not):
-	//   1. The IPv6 payload-length header field must match the actual frame
-	//      size — a mismatched frame is malformed or crafted.
-	//   2. The ICMPv6 checksum must verify against the real pseudo-header;
-	//      relaying unverified frames would let an allowed peer inject
-	//      garbage into the v4 path under ydn64's own source address.
+	// Structural validation of each frame: the IPv6 payload-length header
+	// field must match the actual frame size — a mismatched frame is
+	// malformed or crafted.
 	plen := int(binary.BigEndian.Uint16(pkt[4:6]))
 	if plen < 8 || len(pkt)-40 != plen {
 		return true // consumed (dropped): malformed frame
 	}
-	if cs := ipv6UpperLayerChecksum(srcAddr[:], pool6Src[:], 58, pkt[40:40+plen]); cs != 0 {
-		return true // consumed (dropped): invalid ICMPv6 checksum
+
+	key := reasmKey{src: srcAddr, dst: pool6Src, ident: info.fragIdent}
+	if logger := s.serviceLogger(); logger != nil {
+		logger.Debugf("NAT64 ICMP chain: status=%d l4off=%d frag=%v units=%d more=%v ident=%#x plen=%d framelen=%d",
+			status, info.l4Offset, info.isFrag, info.fragOffset, info.fragMore, info.fragIdent, plen, len(pkt))
+	}
+	if !info.isFrag {
+		msg := pkt[info.l4Offset:]
+		if msg[0] != 128 { // Echo Request only; everything else passes to gVisor
+			return false
+		}
+		// Checksum over the whole datagram's pseudo-header; relaying
+		// unverified frames would let an allowed peer inject garbage into
+		// the v4 path under ydn64's own source address.
+		if cs := ipv6UpperLayerChecksum(srcAddr[:], pool6Src[:], 58, msg); cs != 0 {
+			return true // consumed (dropped): invalid checksum
+		}
+		return s.handleEchoRequest(msg, srcAddr, pool6Src)
 	}
 
-	data := make([]byte, len(pkt)-48)
-	copy(data, pkt[48:])
+	// Fragmented datagram (RFC 8200 §4.5). The first fragment reveals the
+	// upper-layer type; non-echo datagrams stay with gVisor — but if later
+	// fragments were already buffered here, dropping the datagram entirely
+	// beats handing gVisor a half-datagram it can never complete.
+	frag := pkt[info.l4Offset:]
+	if info.fragOffset == 0 && frag[0] != 128 {
+		if s.reasm.cancel(key) {
+			return true
+		}
+		return false
+	}
+
+	complete := s.reasm.add(key, info.fragOffset, info.fragMore, frag, time.Now())
+	if logger := s.serviceLogger(); logger != nil {
+		if complete == nil {
+			logger.Debugf("NAT64 ICMP frag buffered/shed (pending=%d bytes=%d)", s.reasm.pending(), s.reasm.buffered())
+		} else {
+			logger.Debugf("NAT64 ICMP frag complete: %d-byte PDU", len(complete))
+		}
+	}
+	if complete == nil {
+		return true // still incomplete, or shed by the guard rails
+	}
+	if complete[0] != 128 {
+		return true
+	}
+	// Checksum verification happens here, on the reassembled PDU: fragments
+	// carry pieces of one checksummed datagram, not checksums of their own.
+	if cs := ipv6UpperLayerChecksum(srcAddr[:], pool6Src[:], 58, complete); cs != 0 {
+		return true // consumed (dropped): invalid reassembled checksum
+	}
+	return s.handleEchoRequest(complete, srcAddr, pool6Src)
+}
+
+// handleEchoRequest processes one complete ICMPv6 Echo Request message
+// (bytes starting at the type field): it registers/refreshes the session,
+// allocates the NAT identifier and forwards the translated request toward
+// the real IPv4 host. Runs on the NIC read loop.
+func (s *Service) handleEchoRequest(msg []byte, srcAddr, pool6Src [16]byte) bool {
+	id := binary.BigEndian.Uint16(msg[4:6])
+	seq := binary.BigEndian.Uint16(msg[6:8])
+
+	data := make([]byte, len(msg)-8)
+	copy(data, msg[8:])
+
+	var dstIPv4 [4]byte
+	copy(dstIPv4[:], pool6Src[12:]) // embedded IPv4 from the pool6 destination
 
 	sess := s.registerICMPSession(srcAddr, pool6Src, dstIPv4, id)
 	if sess == nil {
@@ -291,8 +342,10 @@ func (s *Service) icmpReplyLoop(logger *log.Logger) {
 // translateICMPv4Reply maps one real ICMPv4 Echo Reply back to its Yggdrasil
 // client: the session is looked up by (reply source, NAT-assigned
 // identifier), the client's own identifier is restored into the reply, and
-// the synthesised IPv6 packet is injected into the netstack. Reports whether
-// the reply was translated.
+// the synthesised IPv6 packet is injected into the netstack. Replies larger
+// than the Yggdrasil MTU — possible only for reassembled oversized requests
+// (RFC 6146 §3.4) — are emitted as proper IPv6 fragments so they survive the
+// peer's MTU enforcement. Reports whether the reply was translated.
 func (s *Service) translateICMPv4Reply(srcV4 [4]byte, echo *icmp.Echo) bool {
 	key := icmpSessionKey{dstAddr: srcV4, id: uint16(echo.ID)}
 	val, ok := s.icmpSessions.Load(key)
@@ -303,6 +356,13 @@ func (s *Service) translateICMPv4Reply(srcV4 [4]byte, echo *icmp.Echo) bool {
 	atomic.StoreInt64(&sess.lastSeenNs, time.Now().UnixNano())
 
 	reply := buildIPv6ICMPEchoReplyPacket(sess.pool6Src[:], sess.yggDst[:], sess.clientID, uint16(echo.Seq), echo.Data)
-	_, err := s.ns.WritePacket(reply)
-	return err == nil
+	ident := uint32(replyFragIdent.Add(1))
+	ok2 := true
+	for _, p := range fragmentIPv6Packet(reply, int(s.ns.MTU()), ident) {
+		if _, err := s.ns.WritePacket(p); err != nil {
+			ok2 = false
+			break
+		}
+	}
+	return ok2
 }

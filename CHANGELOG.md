@@ -12,6 +12,19 @@ moved under the corresponding version heading.
 
 ## [Unreleased]
 
+Fragmented ICMPv6 through NAT64: large pings work end to end
+(RFC 8200 §4.5, RFC 6146 §3.4).
+
+- The intercepted ICMPv6 path no longer assumes a fixed Next Header offset:
+  extension-header chains (Hop-by-Hop, Routing, Destination Options,
+  Fragment) are walked properly, with malformed chains dropped and other
+  protocols passed through to gVisor untouched.
+- Fragmented Echo Requests are reassembled in a strictly bounded table
+  (≤64 datagrams, ≤16 fragments each, ≤64 KiB total, 30 s lifetime; overlap
+  cancels the datagram per RFC 5722) before translation, and oversized
+  replies are emitted as proper IPv6 fragments so they survive the peer's
+  MTU enforcement. `ping6 -s 2000` / `-s 4000` now complete through NAT64.
+
 Anti-abuse hardening: per-source DNS64 rate limiting and NAT64 quotas
 (RFC 5358, RFC 6146 §5.3).
 

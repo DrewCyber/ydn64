@@ -43,7 +43,10 @@ trap cleanup EXIT INT TERM
 # udpecho (test/tools, baked into A's image) echoes datagrams of any size;
 # busybox nc's fixed receive buffer truncates well below the 1472-byte
 # fragmentation threshold and cannot serve as the echo endpoint here.
-$PODMAN exec -d "$CT_A" sh -c "exec udpecho 127.0.0.1:$PORT" >/dev/null
+# Background INSIDE the container shell (orphaned to PID 1): newer podman
+# reaps `podman exec -d` sessions shortly after the client exits, which
+# would silently kill the responder mid-case.
+$PODMAN exec "$CT_A" sh -c "udpecho 127.0.0.1:$PORT >> /work/udpecho.log 2>&1 &" >/dev/null
 wait_for 5 "UDP echo listener bound on A :$PORT" \
   $PODMAN exec "$CT_A" grep -qi ":$HEX_PORT" /proc/net/udp
 

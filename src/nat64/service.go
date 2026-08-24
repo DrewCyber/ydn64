@@ -71,6 +71,10 @@ type Service struct {
 	icmpCount    atomic.Int64
 	icmpClosed   atomic.Bool
 
+	// reasm reassembles fragmented ICMPv6 Echo Requests intercepted from
+	// clients (RFC 8200 §4.5); guard-rail caps bound its memory.
+	reasm *reasmTable
+
 	// errLim rate-limits every synthesised ICMPv6 error (translated v4-side
 	// errors and generated Destination Unreachables alike).
 	errLim errRateLimiter
@@ -130,6 +134,7 @@ func NewService(cfg config.NAT64Config, allowedSources []string, ignoredDstSubne
 		pool6Net:  pool6Net,
 		ns:        ns,
 		srcCounts: newSrcTracker(),
+		reasm:     newReasmTable(),
 	}
 	if cfg.MaxTCPClients > 0 {
 		s.tcpSem = make(chan struct{}, cfg.MaxTCPClients)
@@ -275,15 +280,14 @@ func (s *Service) Start(ctx context.Context, logger *log.Logger) {
 // ICMPv6 interceptor. Returning true means the packet was consumed and must
 // not reach gVisor. UDP is no longer handled here: it goes through gVisor's
 // udp.Forwarder (registered in Start), which gives the stack ownership of
-// checksums, demuxing and fragmentation for that protocol.
+// checksums, demuxing and fragmentation for that protocol. Header-chain
+// discrimination (ICMPv6 vs other protocols, extension headers, fragments)
+// lives in interceptICMPPacket.
 func (s *Service) interceptPacket(pkt []byte) bool {
 	if len(pkt) < 40 || pkt[0]>>4 != 6 {
 		return false
 	}
-	if pkt[6] == 58 { // ICMPv6
-		return s.interceptICMPPacket(pkt)
-	}
-	return false
+	return s.interceptICMPPacket(pkt)
 }
 
 // cleanupSessions periodically expires idle UDP sessions and ICMP echo
