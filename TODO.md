@@ -4,6 +4,5 @@
  - [ ] CGO_ENABLED
  - [ ] Nat64 check by RFCs list
  - [ ] dns64 check by RFCs list
- - [ ] unprivileged ICMP fallback
  - [ ] HOWTO: client side config examples (android, macos, win ..)
  - [?] SIGHUP support for config reload

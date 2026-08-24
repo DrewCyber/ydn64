@@ -223,20 +223,6 @@ If running under podman/Docker, grant the capability explicitly, e.g.:
 podman run --cap-add=NET_RAW ...
 ```
 
-### Planned: unprivileged ICMP fallback
-
-Linux supports **unprivileged ICMP** via `SOCK_DGRAM`/`IPPROTO_ICMP` sockets
-(no `CAP_NET_RAW` needed) when the process's GID falls within the
-`net.ipv4.ping_group_range` sysctl — this is how e.g. `ping` works
-unprivileged in some containers. `golang.org/x/net/icmp` supports this mode
-via the `"udp4"` network string instead of `"ip4:icmp"`.
-
-This is **not yet implemented** — `ydn64` currently always requests a true
-raw socket, so `CAP_NET_RAW` (or root) is the only way to get ICMP NAT64
-working today. A planned improvement is to fall back to `"udp4"` when the
-raw socket fails to open, to support unprivileged environments where
-`ping_group_range` is configured but `CAP_NET_RAW` isn't granted.
-
 ## Standards conformance and deliberate deviations
 
 **`ydn64`'s design goal is to work well for Yggdrasil clients — not to be a
