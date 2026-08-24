@@ -66,20 +66,38 @@ exec_a_logs() { $PODMAN logs "$CT_A" "$@"; }
 # reload_a <description>
 # Sends SIGHUP to the running A (ydn64) container to trigger a live config
 # reload (AllowedSources; DNS64 zones/default forwarder/InvalidAddress/cache
-# settings; Nat64UdpTimeout — see reloadConfig() in cmd/ydn64/main.go) and
-# waits for the resulting "config reloaded" line to appear in A's log.
+# settings/static table — see reloadConfig() in cmd/ydn64/main.go) and waits
+# for the resulting "config reloaded" line to appear in A's log.
 #
 # Assumes $RUN_DIR/ydn64.conf has already been rewritten with the desired
 # change. Unlike the old `podman restart` approach this never tears down
 # A's process or its Yggdrasil peering with B, so there is no re-peering
 # wait and none of the podman-restart re-peering flakiness documented in
 # AGENTS.md — the reload is applied in place, in well under a second.
+#
+# Sends UP TO THREE HUPs before giving up: the first can race the podman
+# VM's attribute cache and deliver A a torn view of a freshly rewritten
+# config file (stale size, new bytes → hjson parse error), especially right
+# after container start on macOS. A repeat HUP simply re-reads the settled
+# file; reloading twice is harmless.
 reload_a() {
   desc=$1
   before=$(wc -l <"$RUN_DIR/ydn64.log" 2>/dev/null || echo 0)
-  $PODMAN kill --signal HUP "$CT_A" >/dev/null
-  wait_for 10 "$desc" \
-    sh -c "tail -n +\$(($before + 1)) '$RUN_DIR/ydn64.log' 2>/dev/null | grep -q 'config reloaded'"
+  attempt=0
+  while :; do
+    $PODMAN kill --signal HUP "$CT_A" >/dev/null
+    waited=0
+    while [ "$waited" -lt 5 ]; do
+      if tail -n +"$((before + 1))" "$RUN_DIR/ydn64.log" 2>/dev/null | grep -q 'config reloaded'; then
+        log "ready: $desc"
+        return 0
+      fi
+      waited=$((waited + 1))
+      sleep 1
+    done
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 3 ] || fail "timed out waiting for: $desc"
+  done
 }
 
 # run_case <case_script_path>

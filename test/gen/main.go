@@ -64,6 +64,8 @@ func main() {
 	dns64Default := flag.String("dns64-default", "8.8.8.8:53", "Dns64Default forwarder host:port (role=ydn64 only)")
 	dns64Invalid := flag.String("dns64-invalid", "ignore", "Dns64InvalidAddress (role=ydn64 only)")
 	dns64Exclude := flag.String("dns64-exclude", "", `comma-separated IPv6 subnets for Dns64AAAAExcludedSubnets (RFC 6147 5.1.4, role=ydn64 only)`)
+	dns64Static := flag.String("dns64-static", "", `comma-separated name=ip pairs for Dns64Static local authoritative answers (role=ydn64 only)`)
+	dns64EmptyZone := flag.Bool("dns64-empty-zone", false, `add a blocked zone for domains "empty.test": no prefix/pass-through → NXDOMAIN for every type without upstream contact (role=ydn64 only)`)
 	nat64Enable := flag.Bool("nat64-enable", true, "Nat64Enable (role=ydn64 only)")
 	udpFiltering := flag.String("udp-filtering", "address-dependent", `Nat64UdpFiltering: "address-dependent", "address-and-port-dependent" or "endpoint-independent" (role=ydn64 only)`)
 	dns64Enable := flag.Bool("dns64-enable", true, "Dns64Enable (role=ydn64 only)")
@@ -193,7 +195,28 @@ func main() {
 				"return-ipv6-addresses": true,
 			})
 		}
+		if *dns64EmptyZone {
+			// Blocked zone for test/cases/17_dns64_static_empty_zones.sh:
+			// no prefix and no pass-through flags → local NXDOMAIN for every
+			// query type without contacting any forwarder.
+			zones = append(zones, map[string]interface{}{
+				"domains": []string{"empty.test"},
+			})
+		}
 		merged["Dns64Zones"] = zones
+
+		if strings.TrimSpace(*dns64Static) != "" {
+			static := map[string]interface{}{}
+			for _, pair := range splitCSV(*dns64Static) {
+				kv := strings.SplitN(pair, "=", 2)
+				if len(kv) != 2 || strings.TrimSpace(kv[0]) == "" || strings.TrimSpace(kv[1]) == "" {
+					fmt.Fprintf(os.Stderr, "error: bad -dns64-static pair %q (want name=ip)\n", pair)
+					os.Exit(1)
+				}
+				static[strings.TrimSpace(kv[0])] = strings.TrimSpace(kv[1])
+			}
+			merged["Dns64Static"] = static
+		}
 
 		envLines = append(envLines,
 			fmt.Sprintf("DNS64_LISTEN=%s", dns64Listen),

@@ -74,9 +74,98 @@ type proxy struct {
 	cfg   atomic.Pointer[proxyConfig]
 	ns    *netstack.YggdrasilNetstack // used to dial Yggdrasil-native (200::/7) forwarders
 
+	// static holds the Dns64Static exact-name table (name → literal IP).
+	// It lives in its own atomic slot rather than inside proxyConfig because
+	// it is orthogonal data: a swap of zones must not be ordered against a
+	// swap of static entries for correctness. Zero value ready.
+	static atomic.Pointer[map[string]net.IP]
+
 	// x20 maps forwarder address → *x20State for the RFC 5452 §9.1 0x20
 	// query-name randomisation health tracking. Zero value ready.
 	x20 sync.Map
+}
+
+// staticRecordTTL is the TTL of locally served Dns64Static records.
+const staticRecordTTL = 300
+
+// setStatic swaps the Dns64Static table (raw config entries; invalid entries
+// are skipped — AppConfig.Validate rejects them at load time). Safe to call
+// concurrently with in-flight queries.
+func (p *proxy) setStatic(entries map[string]string) {
+	m := parseStaticEntries(entries)
+	p.static.Store(&m)
+}
+
+// parseStaticEntries normalises raw Dns64Static config entries into the
+// exact-match table used at serve time: lower-case names without their
+// trailing dot, values parsed as IPs.
+func parseStaticEntries(in map[string]string) map[string]net.IP {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]net.IP, len(in))
+	for name, addr := range in {
+		key := staticKey(name)
+		ip := net.ParseIP(strings.TrimSpace(addr))
+		if key == "" || ip == nil {
+			continue
+		}
+		out[key] = ip
+	}
+	return out
+}
+
+// staticKey normalises a domain name for exact-match static lookups:
+// trimmed, lower-cased, trailing dot stripped.
+func staticKey(name string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+}
+
+// lookupStatic returns the configured literal address for an exact name
+// match against Dns64Static.
+func (p *proxy) lookupStatic(name string) (net.IP, bool) {
+	m := p.static.Load()
+	if m == nil || *m == nil {
+		return nil, false
+	}
+	ip, ok := (*m)[staticKey(name)]
+	return ip, ok
+}
+
+// staticAnswer builds the local authoritative response for a name present in
+// Dns64Static, or nil when this query is not served statically (non-IN
+// class, non-A/AAAA type, or unknown name). A v4 value answers A queries,
+// a v6 value answers AAAA queries — exactly as configured, with no NAT64
+// synthesis; a query for the other family gets NODATA (empty NOERROR),
+// because the name exists but has no record of that type.
+func (p *proxy) staticAnswer(req *dns.Msg, q *dns.Question) *dns.Msg {
+	if q.Qclass != dns.ClassINET || (q.Qtype != dns.TypeA && q.Qtype != dns.TypeAAAA) {
+		return nil
+	}
+	ip, ok := p.lookupStatic(q.Name)
+	if !ok {
+		return nil
+	}
+	resp := new(dns.Msg)
+	req.CopyTo(resp)
+	resp.Response = true
+
+	isV4 := ip.To4() != nil
+	familyMatches := (q.Qtype == dns.TypeA) == isV4
+	if familyMatches {
+		qt := "A"
+		val := ip.To4().String()
+		if q.Qtype == dns.TypeAAAA {
+			qt = "AAAA"
+			val = ip.String()
+		}
+		rr, err := dns.NewRR(fmt.Sprintf("%s %d IN %s %s", q.Name, staticRecordTTL, qt, val))
+		if err == nil && rr != nil {
+			resp.Answer = []dns.RR{rr}
+		}
+	}
+	// Wrong family or unparsable RR: empty NOERROR (NODATA).
+	return resp
 }
 
 // reload atomically replaces the zone table, default forwarder,
@@ -278,9 +367,28 @@ func (p *proxy) handle(req *dns.Msg) *dns.Msg {
 	q := req.Question[0]
 	fqdn := strings.ToLower(q.Name)
 
+	// Dns64Static entries are local authoritative data: they short-circuit
+	// everything below — zone rules, blocked zones, cache and forwarders
+	// alike. They are served regardless of DNSSEC CD+DO because nothing here
+	// is translated upstream content.
+	if sresp := p.staticAnswer(req, &q); sresp != nil {
+		sresp.RecursionAvailable = true
+		sresp.AuthenticatedData = false
+		return sresp
+	}
+
 	z := matchZone(p.cfg.Load().zones, fqdn)
 	if z == nil {
 		// No matching zone and no catch-all → NXDOMAIN.
+		resp := new(dns.Msg)
+		resp.SetRcode(req, dns.RcodeNameError)
+		return resp
+	}
+	if z.blocked() {
+		// Empty zone (neither NAT64 synthesis nor IPv4/IPv6 pass-through
+		// configured): it cannot produce a usable answer for ANY query
+		// type, so answer NXDOMAIN locally without contacting any
+		// forwarder — the zone's domains are a hard block, not a filter.
 		resp := new(dns.Msg)
 		resp.SetRcode(req, dns.RcodeNameError)
 		return resp

@@ -160,6 +160,62 @@ func TestValidateZonePrefixMustBeSlash96Network(t *testing.T) {
 	}
 }
 
+// TestAppConfigValidate_Static pins Dns64Static validation: values must
+// parse as IPv4 or IPv6 literals; keys are normalised (lower-case, trailing
+// dot stripped); duplicates after normalisation are rejected.
+func TestAppConfigValidate_Static(t *testing.T) {
+	dnsBase := func(static map[string]string) AppConfig {
+		return AppConfig{
+			Dns64Enable:  true,
+			Dns64Default: "8.8.8.8:53",
+			Dns64Static:  static,
+		}
+	}
+	t.Run("valid entries accepted and normalised", func(t *testing.T) {
+		cfg := dnsBase(map[string]string{
+			"Test.Example.": "198.51.100.7",
+			"v6.example":    "2001:db8::42",
+		})
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if _, ok := cfg.Dns64Static["test.example"]; !ok {
+			t.Errorf("key not normalised to lower-case/trailing-dot-stripped form: %v", cfg.Dns64Static)
+		}
+		if got := cfg.Dns64Static["test.example"]; got != "198.51.100.7" {
+			t.Errorf("value = %q, want canonical literal", got)
+		}
+	})
+	t.Run("garbage value rejected", func(t *testing.T) {
+		cfg := dnsBase(map[string]string{"x.test": "not-an-ip"})
+		if err := cfg.Validate(); err == nil {
+			t.Error("expected rejection for non-IP value")
+		}
+	})
+	t.Run("CIDR value rejected", func(t *testing.T) {
+		cfg := dnsBase(map[string]string{"x.test": "10.0.0.0/8"})
+		if err := cfg.Validate(); err == nil {
+			t.Error("expected rejection for CIDR value")
+		}
+	})
+	t.Run("empty name rejected", func(t *testing.T) {
+		cfg := dnsBase(map[string]string{"": "192.0.2.1"})
+		if err := cfg.Validate(); err == nil {
+			t.Error("expected rejection for empty name")
+		}
+	})
+	t.Run("duplicate after normalisation rejected", func(t *testing.T) {
+		cfg := dnsBase(map[string]string{
+			"a.test":  "192.0.2.1",
+			"A.TEST.": "192.0.2.2",
+		})
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "duplicate") {
+			t.Errorf("err = %v, want duplicate-key rejection", err)
+		}
+	})
+}
+
 func TestValidateForwarderFormat(t *testing.T) {
 	tests := []struct {
 		forwarder string

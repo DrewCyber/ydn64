@@ -85,6 +85,33 @@ are bare `/96` networks (last four bytes zero) or carry an explicit `/n`
 length — addresses with dirty u-octet/suffix bits are rejected at startup
 instead of misbehaving silently.
 
+### Local answers: `Dns64Static` and blocked zones
+
+`Dns64Static` maps exact domain names to literal IPv4 or IPv6 addresses that
+ydn64 serves locally and authoritatively:
+
+```
+  Dns64Static: {
+    "router.home": "192.168.1.1"
+    "nas.home": "2001:db8::10"
+  }
+```
+
+A queries get the v4 value as an A record, AAAA queries the v6 value as an
+AAAA record — exactly as configured, with no NAT64 synthesis; querying the
+other family returns NODATA (empty NOERROR), since the name exists without
+that type. Static names are checked before any zone rules: they never touch
+a forwarder, survive even blocked zones, and are served to DNSSEC-validating
+clients too (nothing here is translated upstream content). Matching is by
+exact name only — subdomains do not inherit. Reloadable via SIGHUP.
+
+A zone with **neither** a `prefix` **nor** `return-ipv4-addresses` **nor**
+`return-ipv6-addresses` cannot produce an answer for any query type, so it
+answers a local authoritative **NXDOMAIN for its whole domain subtree**
+without contacting any forwarder — a hard block list rather than a filter.
+Queries for names matching no configured zone (and no `"."` catch-all) get
+the same treatment. Reloadable via SIGHUP.
+
 ## 3. Run
 
 ```sh

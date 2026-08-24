@@ -194,6 +194,7 @@ func NewService(cfg config.DNS64Config, allowedSources []string, ignoredDstSubne
 	}
 	excludedAAAA := config.ParseIPNets(cfg.ExcludedAAAASubnets)
 	p.reload(cfg.Default, ia, buildZones(cfg.Zones), config.ParseIPNets(ignoredDstSubnets), excludedAAAA)
+	p.setStatic(cfg.Static)
 
 	allowed := config.ParseAllowedNets(allowedSources)
 	s := &Service{
@@ -210,7 +211,8 @@ func NewService(cfg config.DNS64Config, allowedSources []string, ignoredDstSubne
 }
 
 // Reload atomically replaces AllowedSources, IgnoredDstSubnets, the DNS64 zone table/default
-// forwarder/InvalidAddress policy, the cache's expiration/purge intervals,
+// forwarder/InvalidAddress policy, the static response table (Dns64Static),
+// the cache's expiration/purge intervals,
 // and the per-source query rate limit (RFC 5358), e.g. in response to a
 // SIGHUP-triggered config reload. Safe to call concurrently with in-flight
 // queries. Dns64Listen and Dns64Enable are not reloadable and require a
@@ -224,6 +226,7 @@ func (s *Service) Reload(cfg config.DNS64Config, allowedSources []string, ignore
 	s.allowedNets.Store(&allowed)
 	excludedAAAA := config.ParseIPNets(cfg.ExcludedAAAASubnets)
 	s.proxy.reload(cfg.Default, ia, buildZones(cfg.Zones), config.ParseIPNets(ignoredDstSubnets), excludedAAAA)
+	s.proxy.setStatic(cfg.Static)
 	s.proxy.cache.Reload(time.Duration(cfg.CacheExp)*time.Second, time.Duration(cfg.CachePurge)*time.Second, cfg.MaxCacheEntries)
 	s.rateLimit.update(cfg.RateLimit)
 	return nil

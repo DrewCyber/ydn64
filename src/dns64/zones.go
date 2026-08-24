@@ -43,6 +43,16 @@ type zone struct {
 	returnIPv6Addresses bool
 }
 
+// blocked reports whether the zone can produce NO useful answer for ANY
+// query type: without NAT64 synthesis (prefix) and without IPv4/IPv6
+// pass-through there is nothing it could ever return. Such "empty" zones are
+// answered with a local authoritative NXDOMAIN for every query type,
+// without contacting any forwarder — they act as a hard block for their
+// domains rather than as a filter.
+func (z *zone) blocked() bool {
+	return z.prefix == nil && !z.returnIPv4Addresses && !z.returnIPv6Addresses
+}
+
 // buildZones converts the config zone slice into a slice of resolved zone
 // structs.  Validation has already been done in config.validate().
 func buildZones(cfgZones []config.ZoneConfig) []zone {

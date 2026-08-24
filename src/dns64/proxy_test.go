@@ -339,6 +339,11 @@ func TestIPv4OnlyARPALocalAnswering(t *testing.T) {
 	}
 
 	// Test case 3: Zone with prefix == nil
+	// A zone with no prefix and no return flags is BLOCKED (context/
+	// dns64-parameters.txt "empty-zone" rule): it answers every query type
+	// with a local authoritative NXDOMAIN without contacting any forwarder —
+	// including locally intercepted names like ipv4only.arpa, which are only
+	// reachable through zones that can actually serve data.
 	p.reload("127.0.0.1:53", IAIgnore, []zone{
 		{
 			domains:             []string{"."},
@@ -353,8 +358,8 @@ func TestIPv4OnlyARPALocalAnswering(t *testing.T) {
 		req.SetQuestion("ipv4only.arpa.", dns.TypeAAAA)
 		resp := p.handle(req)
 
-		if resp.Rcode != dns.RcodeSuccess {
-			t.Errorf("expected RcodeSuccess, got %d", resp.Rcode)
+		if resp.Rcode != dns.RcodeNameError {
+			t.Errorf("expected RcodeNameError from a blocked zone, got %d", resp.Rcode)
 		}
 		if len(resp.Answer) != 0 {
 			t.Errorf("expected 0 answers, got %d", len(resp.Answer))

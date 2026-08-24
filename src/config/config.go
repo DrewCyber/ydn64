@@ -36,6 +36,9 @@ type DNS64Config struct {
 	// real AAAA records within these IPv6 subnets are stripped from answers.
 	ExcludedAAAASubnets []string
 	Zones               []ZoneConfig
+	// Static maps normalised domain names to literal IP addresses
+	// (Dns64Static). Answered locally; see AppConfig.Dns64Static.
+	Static map[string]string
 }
 
 // NAT64Config holds configuration for the NAT64 service.
@@ -125,6 +128,12 @@ type AppConfig struct {
 	Dns64InvalidAddress       string       `json:"Dns64InvalidAddress"`
 	Dns64AAAAExcludedSubnets  []string     `json:"Dns64AAAAExcludedSubnets"`
 	Dns64Zones                []ZoneConfig `json:"Dns64Zones"`
+	// Dns64Static maps exact domain names to literal IPv4 or IPv6
+	// addresses. Matching names are answered locally and authoritatively —
+	// A records for v4 values, AAAA records for v6 values, no NAT64
+	// synthesis, never contacting a forwarder. Keys are normalised
+	// (lower-case, trailing dot stripped) during Validate.
+	Dns64Static map[string]string `json:"Dns64Static,omitempty"`
 }
 
 // ApplyPrivateKeyOverride recomputes Nat64Pool and Dns64Listen, and resets
@@ -202,6 +211,7 @@ func (c *AppConfig) DNS64() DNS64Config {
 		InvalidAddress:      c.Dns64InvalidAddress,
 		ExcludedAAAASubnets: c.Dns64AAAAExcludedSubnets,
 		Zones:               c.Dns64Zones,
+		Static:              c.Dns64Static,
 	}
 }
 
@@ -365,6 +375,24 @@ func (c *AppConfig) Validate() error {
 					return err
 				}
 			}
+		}
+		if len(c.Dns64Static) > 0 {
+			norm := make(map[string]string, len(c.Dns64Static))
+			for name, addr := range c.Dns64Static {
+				key := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+				if key == "" {
+					return fmt.Errorf("Dns64Static: empty domain name")
+				}
+				ip := net.ParseIP(strings.TrimSpace(addr))
+				if ip == nil {
+					return fmt.Errorf(`Dns64Static[%q]: %q is not a valid IPv4 or IPv6 address`, name, addr)
+				}
+				if _, dup := norm[key]; dup {
+					return fmt.Errorf("Dns64Static: duplicate entry for %q after normalisation", key)
+				}
+				norm[key] = ip.String()
+			}
+			c.Dns64Static = norm
 		}
 		if c.Dns64CacheExpiration <= 0 {
 			c.Dns64CacheExpiration = 300
