@@ -4,8 +4,8 @@ ydn64 — RFC REFERENCE LIST
 Authoritative list of the RFCs that ydn64's NAT64 and DNS64 implementations
 are measured against, with current implementation status.
 
-Last reviewed: 2026-08-24 (RFC 4787 REQ-3 UDP port parity preservation
-landed in one session)
+Last reviewed: 2026-08-24 (RFC 6891 EDNS(0) option passthrough — COOKIE /
+CLIENT-SUBNET round-trip — landed in one session)
 Documented deviations: README.md, "Standards conformance and deliberate deviations"
 
 DESIGN GOAL: ydn64 aims to work well for Yggdrasil clients, NOT to be a
@@ -244,13 +244,21 @@ RFC 3596 — DNS Extensions to Support IP Version 6                     [DONE]
     AAAA RR and §2.5 ip6.arpa nibble format. ydn64's PTR parser validates
     nibble count and character range.
 
-RFC 6891 — Extension Mechanisms for DNS (EDNS(0))                  [PARTIAL]
+RFC 6891 — Extension Mechanisms for DNS (EDNS(0))                     [DONE]
     Obsoletes RFC 2671, which RFC 6147 §5.4 cites. UDP payload size
     negotiation and truncation implemented (§6.2.3-6.2.5): classic
     non-OPT queries are answered within 512 bytes (TC beyond), advertised
     sizes below 512 are treated as 512, and larger advertisements are
-    clamped at 4096.     Outstanding:
-      - EDNS(0) options (e.g., COOKIE, CLIENT-SUBNET)            [TODO]
+    clamped at 4096.
+      - EDNS(0) options (COOKIE, CLIENT-SUBNET, ...): ydn64 owns the
+        response OPT (it terminates the client-facing exchange), so every
+        response — UDP and TCP — gets a rebuilt OPT carrying relayed
+        options: an upstream OPT's options pass through verbatim (server
+        cookies round-trip against the real-internet upstream; ECS
+        responses flow back), while locally generated answers echo only
+        the client's COOKIE per RFC 7873 §5.2. Query-side options reach
+        the upstream untouched (CopyTo). Classic clients never receive an
+        OPT. ydn64 generates no cookies or ECS of its own.          [DONE]
       - DNSSEC support (DO bit, CD bit) — see RFC 6147 §5.5      [DONE]
         (minimum viable subset; ydn64 does not validate)
 
@@ -309,12 +317,20 @@ RFC 8482 — Providing Minimal-Sized Responses to DNS Queries that have
     ydn64 rewrites ANY to AAAA and applies normal synthesis rather than
     answering minimally, so IPv6-only clients get a usable answer.
 
-RFC 7873 / RFC 9018 — DNS Cookies                                     [TODO]
-    Optional anti-spoofing / anti-amplification hardening.
+RFC 7873 / RFC 9018 — DNS Cookies                                  [PARTIAL]
+    Optional anti-spoofing / anti-amplification hardening. Transparent
+    support: client cookies round-trip to ydn64's upstream via EDNS(0)
+    option relay (see RFC 6891 above), so the internet-facing leg gets
+    real cookie protection. ydn64 itself neither validates nor generates
+    cookies — the Yggdrasil transport already authenticates the
+    client-facing leg, leaving little for server-side cookies to add.
 
-RFC 7871 — Client Subnet in DNS Queries                                [N/A]
-    Optional. Not implemented; may degrade CDN geolocation through the
-    configured forwarder.
+RFC 7871 — Client Subnet in DNS Queries                               [DONE]
+    Optional. Transparent passthrough: query-side ECS options are
+    forwarded to the configured forwarder verbatim and its ECS responses
+    are relayed back (see RFC 6891 above), so CDN geolocation degrades no
+    further than the upstream allows. ydn64 generates or rewrites no ECS
+    of its own.
 
 
 D. PREFIX DISCOVERY AND CLIENT INTEGRATION

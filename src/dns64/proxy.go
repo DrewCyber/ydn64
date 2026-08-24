@@ -287,6 +287,10 @@ func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string
 	if cached, ok := p.cache.get(cacheKeyFor(q)); ok {
 		cachedAnswer := p.dropExcludedAAAA(cached)
 		if containsAAAA(cachedAnswer) {
+			// Cache hits have no upstream exchange behind them, so resp.Extra
+			// keeps the request's copy: finalizeResponseEdns treats this as a
+			// locally generated answer (client COOKIE echoed, no upstream
+			// options to relay).
 			resp := new(dns.Msg)
 			req.CopyTo(resp)
 			resp.Answer = cachedAnswer
@@ -331,6 +335,11 @@ func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string
 			resp := new(dns.Msg)
 			req.CopyTo(resp)
 			resp.Answer = answer
+			// Relay the upstream Extra (OPT included) exactly like the
+			// NXDOMAIN and A-synthesis paths do, so finalizeResponseEdns can
+			// carry the upstream's EDNS(0) options (server cookies, ECS
+			// echo) back to the client.
+			resp.Extra = upResp.Extra
 			resp.Question[0].Qtype = dns.TypeAAAA
 			resp.Response = true
 			return resp, nil

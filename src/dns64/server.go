@@ -75,6 +75,88 @@ func negotiateUDPSize(clientOPT *dns.OPT) int {
 	return size
 }
 
+// finalizeResponseEdns rebuilds the EDNS(0) record of a response about to go
+// back to the client, preserving EDNS(0) OPTIONS across the DNS64 proxy hop
+// (RFC 6891 §6.1.1 makes the OPT a per-exchange record; ydn64 terminates the
+// client-facing exchange, so it owns the response OPT), and returns the
+// negotiated UDP payload size the caller must truncate to.
+//
+//   - A classic (non-EDNS) query never receives an OPT: any OPT relayed from
+//     upstream is stripped, guaranteeing what RFC 6891 §6.2.2 implies — no
+//     OPT in responses to non-EDNS queries.
+//   - Otherwise ydn64 answers with its own OPT (UDPSize = maxUDPSize,
+//     DO = the query's DO bit, extended RCODE reset — unchanged behaviour)
+//     and re-attaches options so they survive translation:
+//     1. If the response carries an upstream OPT (the proxied paths relay
+//     upResp.Extra), its options are relayed verbatim. This makes DNS
+//     COOKIE (RFC 7873) work against the real-internet upstream leg:
+//     the client's cookie reaches the forwarder's upstream, whose
+//     server-cookie comes straight back and is echoed upstream again on
+//     later queries. ECS responses (RFC 7871) flow back the same way.
+//     2. Locally generated answers — ipv4only.arpa, cache hits, no-zone
+//     NXDOMAIN, SERVFAIL/shed; anything without an upstream OPT — echo
+//     only the client's COOKIE option(s), which RFC 7873 §5.2 requires of
+//     the responding server. Other request options are deliberately NOT
+//     echoed: servers must ignore unsupported options (RFC 7871 §6), and
+//     echoing them would just fatten a reflection payload.
+//
+// The cookie round-trip is transparent only: ydn64 neither validates nor
+// generates cookies of its own — the Yggdrasil transport already
+// authenticates the client-facing leg.
+func finalizeResponseEdns(resp *dns.Msg, req *dns.Msg) int {
+	clientOPT := req.IsEdns0()
+	udpSize := negotiateUDPSize(clientOPT)
+
+	// Collect the upstream options BEFORE the strip below removes their
+	// carrying OPT record. Only an OPT that arrived inside resp counts as
+	// "upstream" — request-built responses carry the client's own OPT here,
+	// but that case is indistinguishable from absent, which is exactly the
+	// local-answer fallback below.
+	var upstreamOpts []dns.EDNS0
+	for _, rr := range resp.Extra {
+		if opt, ok := rr.(*dns.OPT); ok {
+			upstreamOpts = opt.Option
+			break
+		}
+	}
+
+	filteredExtra := resp.Extra[:0]
+	for _, rr := range resp.Extra {
+		if rr.Header().Rrtype != dns.TypeOPT {
+			filteredExtra = append(filteredExtra, rr)
+		}
+	}
+	resp.Extra = filteredExtra
+
+	if clientOPT == nil {
+		return udpSize // classic client: never answer with an OPT
+	}
+
+	resp.SetEdns0(maxUDPSize, clientOPT.Do())
+	opts := upstreamOpts
+	if len(opts) == 0 {
+		opts = echoedClientCookie(clientOPT)
+	}
+	if len(opts) > 0 {
+		respOPT := resp.IsEdns0()
+		respOPT.Option = append(respOPT.Option, opts...)
+	}
+	return udpSize
+}
+
+// echoedClientCookie extracts the client's DNS COOKIE option(s) for echoing
+// on locally generated answers (see finalizeResponseEdns). Everything else is
+// ignored per the RFC 7871 §6 unsupported-option rule.
+func echoedClientCookie(clientOPT *dns.OPT) []dns.EDNS0 {
+	var out []dns.EDNS0
+	for _, o := range clientOPT.Option {
+		if _, ok := o.(*dns.EDNS0_COOKIE); ok {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
 // Service is the embedded DNS64 server.
 type Service struct {
 	proxy       *proxy
@@ -386,21 +468,8 @@ func (s *Service) serveUDP(conn *gonet.UDPConn, logger *log.Logger) {
 			}
 			defer s.releaseQuery()
 
-			clientOPT := req.IsEdns0()
-			udpSize := negotiateUDPSize(clientOPT)
-
 			resp := s.proxy.handle(req)
-
-			if clientOPT != nil {
-				filteredExtra := resp.Extra[:0]
-				for _, rr := range resp.Extra {
-					if rr.Header().Rrtype != dns.TypeOPT {
-						filteredExtra = append(filteredExtra, rr)
-					}
-				}
-				resp.Extra = filteredExtra
-				resp.SetEdns0(maxUDPSize, clientOPT.Do())
-			}
+			udpSize := finalizeResponseEdns(resp, req)
 
 			if resp.Len() > udpSize {
 				resp.Truncate(udpSize)
@@ -558,6 +627,10 @@ func (s *Service) serveTCPConn(conn net.Conn, logger *log.Logger) {
 			defer func() { <-slots }()
 
 			resp := s.proxy.handle(req)
+			// Same EDNS(0) normalisation as the UDP path; the negotiated
+			// UDP size does not constrain TCP messages (RFC 6891 §6.2.1),
+			// so the returned limit is ignored here.
+			finalizeResponseEdns(resp, req)
 			writeResponse(resp)
 		}(req)
 	}
