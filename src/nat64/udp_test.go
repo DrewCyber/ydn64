@@ -458,3 +458,28 @@ func countSessions(s *Service) int {
 	})
 	return n
 }
+
+// TestUDPBufPoolRecycles pins the buffer-pool contract the UDP relay loops
+// rely on (code-review-2026-08-24 #4): Get always yields a full-size buffer,
+// and buffers are reusable after Put. Reuse is only sound because every
+// consumer of a read (WriteToUDP, conn6.Write, injectUnsolicitedUDP) copies
+// the payload synchronously before its loop returns the buffer — if a future
+// consumer ever retains a slice past that point, it must copy first.
+func TestUDPBufPoolRecycles(t *testing.T) {
+	buf := udpBufPool.Get().([]byte)
+	if len(buf) != maxUDPDatagramSize {
+		t.Fatalf("pooled buffer len = %d, want %d", len(buf), maxUDPDatagramSize)
+	}
+	for i := range buf {
+		buf[i] = 0xAA
+	}
+	udpBufPool.Put(buf)
+
+	next := udpBufPool.Get().([]byte)
+	if len(next) != maxUDPDatagramSize {
+		t.Fatalf("recycled buffer len = %d, want %d", len(next), maxUDPDatagramSize)
+	}
+	if &buf[0] != &next[0] {
+		t.Log("pool handed out a different backing array (valid but means GC ran between Get calls)")
+	}
+}

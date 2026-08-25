@@ -177,6 +177,21 @@ type udpFlow struct {
 // silently truncates datagrams that do not fit (like recvmsg(2) does).
 const maxUDPDatagramSize = 65535
 
+// udpBufPool recycles the 64 KiB read buffers of the UDP relay loops.
+// Every session's forward loop and every BIB's reply loop needs exactly one,
+// so at the default caps (Nat64MaxUDPSessions=4096) naive per-goroutine
+// allocation peaks around 256 MiB plus allocator churn from constant session
+// turnover; pooling keeps resident memory at the true high-water mark and
+// lets churned buffers be reused instead of collected and re-allocated.
+//
+// Hand-off safety: every consumer of a read (WriteToUDP toward the real
+// server, conn6.Write into gVisor, injectUnsolicitedUDP's packet build)
+// copies the bytes synchronously before returning, so a buffer may be reused
+// as soon as its loop puts it back.
+var udpBufPool = sync.Pool{
+	New: func() any { return make([]byte, maxUDPDatagramSize) },
+}
+
 // parseUDPFlow filters an unmatched inbound UDP datagram reported by the
 // gVisor forwarder and extracts the NAT64 flow it describes.
 //
@@ -526,7 +541,8 @@ func (s *Service) handleUDPForward(req *udp.ForwarderRequest, logger *log.Logger
 // is unaffected by sharing.
 func (s *Service) udpForwardLoop(sess *udpSession, key sessionKey) {
 	defer s.deleteSession(sess, key)
-	buf := make([]byte, maxUDPDatagramSize)
+	buf := udpBufPool.Get().([]byte)
+	defer udpBufPool.Put(buf)
 	for {
 		n, err := sess.conn6.Read(buf)
 		if err != nil {
@@ -559,7 +575,8 @@ func (s *Service) udpReplyLoop(bib *udpBIB, bk bibKey) {
 		// re-created BIB under the same key safe.
 		s.bibs.CompareAndDelete(bk, bib)
 	}()
-	buf := make([]byte, maxUDPDatagramSize)
+	buf := udpBufPool.Get().([]byte)
+	defer udpBufPool.Put(buf)
 	lg := s.serviceLogger()
 	for {
 		n, raddr, err := bib.uconn.ReadFromUDP(buf)
