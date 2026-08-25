@@ -10,6 +10,83 @@ unless they affect users.
 Entries are grouped under an unreleased heading until a release is cut, then
 moved under the corresponding version heading.
 
+## [0.7.1] - 2026-08-25
+
+Hardening release from the consolidated code review of 2026-08-24 (all
+17 findings fixed): one remote-crash security fix, DNS64 large-answer
+and TCP improvements plus new `Dns64Static` zone semantics, several
+NAT64 resource-robustness fixes — and a repair of the tagged-release
+container image build itself.
+
+### Security
+
+- **Fixed a remote crash in the NAT64 ICMPv6 interceptor (P0)**: an
+  allowed peer could kill the whole node with a single crafted frame
+  whose IPv6 header chain ends exactly at end-of-frame — it passed every
+  structural check and then panicked the netstack read-loop goroutine
+  with an index-out-of-range whenever ICMP NAT64 was active. Malformed
+  datagrams are now dropped as such; zero-length fragments cancel any
+  buffered reassembly (RFC 8200 §4.5); and the interceptor hook is
+  wrapped in a recover() so a future unguarded index costs one dropped
+  frame plus a logged warning, never the read loop.
+
+### DNS64
+
+- **New `Dns64Static` local answers and blocked empty zones**:
+  `Dns64Static` maps exact names to literal IPv4/IPv6 addresses answered
+  locally and authoritatively — no synthesis, cache or upstream contact;
+  wrong-family queries get NODATA; static names are served to
+  DNSSEC-validating clients too and win over zone rules including
+  blocked zones. A zone with neither a prefix nor return flags is now a
+  hard block: local authoritative NXDOMAIN for every query type under
+  its domains, without contacting upstream. SIGHUP-reloadable.
+- **Large answers over TCP now work**: queries arriving via TCP were
+  proxied upstream over UDP, so TCP clients got UDP-sized or TC-flagged
+  answers and big lookups (DNSKEY, large TXT) failed on that leg.
+  Upstream transport now mirrors the client's per RFC 7766 §8.2, and a
+  truncated UDP upstream answer is retried once over TCP so clients
+  with larger buffers receive complete data instead of a dead end.
+
+### NAT64 robustness
+
+- **TCP half-close is preserved through the translator**: a clean EOF
+  from one leg now CloseWrite's the other instead of tearing the
+  connection down, keeping shutdown-write-then-read protocols working
+  end to end.
+- **Keepalive dead-peer detection on the OS-dialled IPv4 leg** (~165 s
+  budget, mirroring the gVisor leg): a silently vanished IPv4 peer frees
+  its global/per-source connection slots in minutes instead of lingering
+  until Nat64TcpTimeout (2h04m at the default).
+- The ICMPv4 error budget is spent only after the quoted packet matches
+  a live session, so background ICMP noise can no longer starve genuine
+  PMTUD / Time-Exceeded translations during busy periods.
+- Endpoint-independent-filtering injection is token-bucketed (100
+  datagrams/s sustained, burst 200) — the last unsolicited outbound
+  synthesis path without a rate limit is closed.
+- UDP relay loops pool their 64 KiB read buffers: constant session
+  turnover no longer drives hundreds of MiB of allocation churn at the
+  default caps; resident memory stays at the true high-water mark.
+- Address-dependent UDP reply demux deterministically picks the
+  most-recently-active flow toward the server IP instead of Go's
+  randomized map-order pick.
+
+### Configuration & diagnostics
+
+- A SIGHUP reload now warns that `Nat64MaxTCPConnections` /
+  `Dns64MaxConcurrentQueries` require a restart (both are sized at
+  service construction) instead of silently ignoring them, like the
+  other restart-required keys; unknown `-loglevel` values warn too.
+- A SIGHUP reload that empties `AllowedSources` repeats the loud
+  deny-all warning, matching startup behaviour.
+
+### Packaging
+
+- **Fixed the broken release container image build**: the Dockerfile
+  copied LICENSE out of the build stage with a relative `COPY --from`
+  source, which resolves against the final stage's root and failed
+  multi-arch builds with `"/LICENSE": not found`. It is now staged into
+  `/out/` next to the binary and notices file and copied from there.
+
 ## [0.7.0] - 2026-08-24
 
 **Full RFC coverage milestone.** Every requirement ydn64 can honour across
