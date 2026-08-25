@@ -190,7 +190,7 @@ func (s *YggdrasilNetstack) deliverInbound(nic *YggdrasilNIC, rx int) {
 	interceptor := s.interceptor
 	d := nic.dispatcher
 	s.mu.RUnlock()
-	if interceptor != nil && interceptor(nic.readBuf[:rx]) {
+	if interceptor != nil && s.runInterceptor(interceptor, nic.readBuf[:rx]) {
 		return // packet was consumed by the interceptor
 	}
 	if d == nil {
@@ -201,6 +201,30 @@ func (s *YggdrasilNetstack) deliverInbound(nic *YggdrasilNIC, rx int) {
 	})
 	d.DeliverNetworkPacket(ipv6.ProtocolNumber, pkb)
 	pkb.DecRef()
+}
+
+// runInterceptor invokes fn with panic containment. The interceptor runs on
+// the NIC read loop — the one goroutine whose death stops all traffic — so a
+// panic inside the hook must cost one dropped frame plus a logged warning,
+// never the process; the hook is treated as having consumed the frame, since
+// forwarding a half-processed packet would be worse than dropping it.
+//
+// The guard deliberately wraps only our own hook, not gVisor's dispatcher:
+// resuming mid-delivery with stack-internal locks held could deadlock, so a
+// panic from inside gVisor stays fatal and loud instead of being masked.
+func (s *YggdrasilNetstack) runInterceptor(fn func([]byte) bool, frame []byte) (consumed bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			consumed = true
+			s.mu.RLock()
+			logf := s.logf
+			s.mu.RUnlock()
+			if logf != nil {
+				logf("netstack: packet interceptor panicked (%v); dropped %d-byte inbound frame", r, len(frame))
+			}
+		}
+	}()
+	return fn(frame)
 }
 
 // initWriteBufs seeds the writeBufs pool with MTU-sized scratch buffers.

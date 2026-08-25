@@ -470,3 +470,43 @@ func TestCtrlDropsCountedAndWarnedOnce(t *testing.T) {
 		t.Fatalf("warnings = %d, want exactly 1 within the rate-limit window", got)
 	}
 }
+
+// TestRunInterceptorContainsPanics: a panicking packet interceptor runs on
+// the NIC read loop — the one goroutine whose death stops all traffic — so it
+// must be contained: the frame is reported as consumed (dropped) and a
+// warning is logged instead of the process dying.
+func TestRunInterceptorContainsPanics(t *testing.T) {
+	ns := &YggdrasilNetstack{}
+	spy := &logSpy{}
+	ns.logf = spy.Printf
+
+	called := false
+	consumed := ns.runInterceptor(func([]byte) bool {
+		called = true
+		panic("boom")
+	}, make([]byte, 42))
+	if !called {
+		t.Fatal("interceptor was never invoked")
+	}
+	if !consumed {
+		t.Fatal("panicking interceptor must report the frame as consumed")
+	}
+	if spy.count() != 1 {
+		t.Fatalf("warnings = %d, want 1", spy.count())
+	}
+
+	// A healthy hook passes its verdict through untouched.
+	if got := ns.runInterceptor(func([]byte) bool { return false }, nil); got {
+		t.Fatal("healthy interceptor returning false was reported as consumed")
+	}
+	if got := ns.runInterceptor(func([]byte) bool { return true }, nil); !got {
+		t.Fatal("healthy interceptor returning true was not reported as consumed")
+	}
+
+	// logf is wired only when main calls SuperviseReadLoop, microseconds
+	// after the read loop starts; containment must survive it being nil.
+	bare := &YggdrasilNetstack{}
+	if !bare.runInterceptor(func([]byte) bool { panic("boom") }, nil) {
+		t.Fatal("nil-logf containment failed")
+	}
+}

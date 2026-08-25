@@ -130,6 +130,9 @@ func (s *Service) interceptICMPPacket(pkt []byte) bool {
 	}
 	if !info.isFrag {
 		msg := pkt[info.l4Offset:]
+		if len(msg) < 8 { // echo header minimum (type..seq): truncated L4
+			return true // consumed (dropped): malformed/truncated datagram
+		}
 		if msg[0] != 128 { // Echo Request only; everything else passes to gVisor
 			return false
 		}
@@ -147,6 +150,14 @@ func (s *Service) interceptICMPPacket(pkt []byte) bool {
 	// fragments were already buffered here, dropping the datagram entirely
 	// beats handing gVisor a half-datagram it can never complete.
 	frag := pkt[info.l4Offset:]
+	if len(frag) == 0 {
+		// Zero-length fragments are invalid (RFC 8200 §4.5: every fragment
+		// carries at least one byte; all but the last are multiples of 8).
+		// If any earlier fragments of this datagram were already buffered,
+		// they can never complete — drop the whole datagram.
+		s.reasm.cancel(key)
+		return true // consumed (dropped): malformed empty fragment
+	}
 	if info.fragOffset == 0 && frag[0] != 128 {
 		if s.reasm.cancel(key) {
 			return true
