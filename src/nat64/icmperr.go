@@ -329,9 +329,12 @@ func (s *Service) handleICMPv4Error(srcV4 [4]byte, raw []byte, logger *log.Logge
 		logger.Debugf("NAT64 ICMPv4 error from %s: unusable quoted packet", net.IP(srcV4[:]))
 		return
 	}
-	if !s.errLim.allow(time.Now()) {
-		return
-	}
+	// NOTE: no rate-limit token is consumed here. The raw socket receives
+	// every ICMPv4 error the host sees — most of it unrelated noise (other
+	// processes' traceroutes, PMTUD for host traffic) that will never demux
+	// to a live NAT64 session. Budget is spent at the injection point
+	// (injectICMPv6), only once a session actually matched, so noise cannot
+	// starve genuine PMTUD/Time-Exceeded translations for live flows.
 
 	// Type-specific word: Packet Too Big MTU or parameter-problem pointer.
 	var extra uint32
@@ -453,8 +456,17 @@ func (s *Service) translateEchoQuotedError(srcV4 [4]byte, inner icmpInnerPacket,
 	s.injectICMPv6(pkt, logger, "ICMP", qKey, v6Type, v6Code, srcV4)
 }
 
-// injectICMPv6 writes a synthesised error into the Yggdrasil network.
+// injectICMPv6 writes a synthesised error into the Yggdrasil network. The
+// errLim budget is consumed here — after demux matched a live session — so
+// unrelated host ICMP noise on the raw socket cannot drain the tokens meant
+// for genuine translations of live flows.
 func (s *Service) injectICMPv6(pkt []byte, logger *log.Logger, kind string, key any, v6Type, v6Code byte, srcV4 [4]byte) {
+	if !s.errLim.allow(time.Now()) {
+		if logger != nil {
+			logger.Debugf("NAT64 ICMPv6 error inject (%s) rate-limited (%d/%d)", kind, v6Type, v6Code)
+		}
+		return
+	}
 	if _, err := s.ns.WritePacket(pkt); err != nil {
 		if logger != nil {
 			logger.Debugf("NAT64 ICMPv6 error inject (%s): %v", kind, err)

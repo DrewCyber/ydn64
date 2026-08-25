@@ -646,3 +646,42 @@ func TestPool6AddrForEmbedding(t *testing.T) {
 		t.Fatalf("pool6AddrFor = %v, want %v", net.IP(got[:]), want)
 	}
 }
+
+// TestICMPv4ErrorNoiseDoesNotDrainBudget pins the code-review-2026-08-24 #5
+// fix: the raw socket receives every ICMPv4 error the host sees, and most of
+// it is unrelated noise that demuxes to no live NAT64 session. Such noise
+// must not consume errLim tokens — after any amount of it, a genuine
+// translation for a live flow still goes out at full burst strength.
+func TestICMPv4ErrorNoiseDoesNotDrainBudget(t *testing.T) {
+	env := newICMPErrTestEnv(t)
+	var hopV4 [4]byte
+	copy(hopV4[:], net.ParseIP(testErrRouter4).To4())
+
+	// Structurally valid Time Exceeded whose quoted UDP flow matches no
+	// live session: pure host noise.
+	noiseQuoted := buildIPv4Quoted(t, net.ParseIP("192.0.2.7"), net.ParseIP("198.51.100.77"), 17, 64,
+		buildUDPHeader(54321, 12345))
+	noise := buildICMPv4Error(11, 0, 0, noiseQuoted)
+	for i := 0; i < icmpErrBurst+10; i++ {
+		env.svc.handleICMPv4Error(hopV4, noise, errTestLogger)
+	}
+	if got := len(env.ns.packets()); got != 0 {
+		t.Fatalf("noise injected %d packets, want 0", got)
+	}
+
+	// A live flow's translation must still be delivered at full burst strength.
+	client6 := net.ParseIP(testClient6)
+	dstV4 := [4]byte(net.ParseIP(testServerV4).To4())
+	registerFakeUDPSession(env.svc, client6, 5000, dstV4, 53,
+		[4]byte(net.ParseIP(testLocalIP4).To4()), 40000)
+
+	liveQuoted := buildIPv4Quoted(t, net.ParseIP(testLocalIP4), net.ParseIP(testServerV4), 17, 64,
+		buildUDPHeader(40000, 53))
+	live := buildICMPv4Error(11, 0, 0, liveQuoted)
+	for i := 0; i < icmpErrBurst; i++ {
+		env.svc.handleICMPv4Error(hopV4, live, errTestLogger)
+	}
+	if got := len(env.ns.packets()); got != icmpErrBurst {
+		t.Fatalf("live translations after noise = %d, want full burst %d", got, icmpErrBurst)
+	}
+}
