@@ -178,3 +178,36 @@ func TestEndpointIndependentFiltering(t *testing.T) {
 		}
 	})
 }
+
+// TestEIFInjectionRateLimited pins the code-review-2026-08-24 #6 fix: the
+// unsolicited-datagram injection path is the one outbound synthesis any IPv4
+// host can reach without prior contact (given a known/brute-forced mapped
+// ip:port), so it must shed beyond its token bucket instead of flooding the
+// Yggdrasil leg. Amplification is ≤1, so exactly eifBurst single-packet
+// injections must survive a flood.
+func TestEIFInjectionRateLimited(t *testing.T) {
+	env := newICMPTestEnv(t)
+
+	bk := bibKey{
+		srcAddr: [16]byte(net.ParseIP("200:a:b:c::9").To16()),
+		srcPort: 48000,
+	}
+	raddr := &net.UDPAddr{IP: net.ParseIP("192.0.2.50").To4(), Port: 5353}
+
+	for i := 0; i < eifBurst+25; i++ {
+		env.svc.injectUnsolicitedUDP(bk, raddr, []byte("flood"), nil)
+	}
+	if got := len(env.ns.packets()); got != eifBurst {
+		t.Fatalf("injected %d datagrams, want burst cap %d", got, eifBurst)
+	}
+
+	// Each surviving injection must be a well-formed synthesised UDP packet
+	// toward the BIB's client (spot-check the first). The source is
+	// pool6::<raddr> = 300:1:2:3:: + 192.0.2.50 embedded.
+	pkt := env.ns.packets()[0]
+	got := parseOutboundUDP(t, pkt,
+		net.ParseIP("300:1:2:3::c000:232"), net.IP(bk.srcAddr[:]), 5353, 48000)
+	if string(got) != "flood" {
+		t.Errorf("injected payload = %q, want %q", got, "flood")
+	}
+}

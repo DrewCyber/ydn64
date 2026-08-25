@@ -286,16 +286,24 @@ type errRateLimiter struct {
 }
 
 func (r *errRateLimiter) allow(now time.Time) bool {
+	return r.allowBudget(now, icmpErrRatePerSec, icmpErrBurst)
+}
+
+// allowBudget is the generic token-bucket refill-and-spend step; callers
+// supply their own sustained rate and burst so one limiter shape serves every
+// synthesis path (translated errors, generated unreachables, EIF injection).
+// Zero-value ready: the first call seeds the bucket at its full burst.
+func (r *errRateLimiter) allowBudget(now time.Time, perSec float64, burst float64) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.last.IsZero() {
 		r.last = now
-		r.tokens = icmpErrBurst
+		r.tokens = burst
 	}
-	r.tokens += now.Sub(r.last).Seconds() * icmpErrRatePerSec
+	r.tokens += now.Sub(r.last).Seconds() * perSec
 	r.last = now
-	if r.tokens > icmpErrBurst {
-		r.tokens = icmpErrBurst
+	if r.tokens > burst {
+		r.tokens = burst
 	}
 	if r.tokens < 1 {
 		return false

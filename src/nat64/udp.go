@@ -192,6 +192,19 @@ var udpBufPool = sync.Pool{
 	New: func() any { return make([]byte, maxUDPDatagramSize) },
 }
 
+// Endpoint-independent-filtering injection rate limiting. Once a client has
+// a BIB under endpoint-independent filtering, any IPv4 host that knows (or
+// brute-forces) the mapped ip:port can flood unsolicited datagrams, each
+// rebuilt as IPv6 and injected onto the Yggdrasil leg. The amplification
+// ratio is ≤1 (one inbound datagram → at most one outbound datagram), so a
+// modest budget suffices: comfortably above realistic legitimate volumes for
+// never-contacted senders (whose replies-within-flow go through sessions and
+// are unaffected), an order of magnitude below what flooding would push.
+const (
+	eifRatePerSec = 100
+	eifBurst      = 200
+)
+
 // parseUDPFlow filters an unmatched inbound UDP datagram reported by the
 // gVisor forwarder and extracts the NAT64 flow it describes.
 //
@@ -619,6 +632,16 @@ func (s *Service) udpReplyLoop(bib *udpBIB, bk bibKey) {
 // path the ICMP translation uses; oversized payloads are fragmented on the
 // way out exactly like synthesised echo replies.
 func (s *Service) injectUnsolicitedUDP(bk bibKey, raddr *net.UDPAddr, payload []byte, lg *log.Logger) {
+	// This is the one outbound synthesis path reachable by IPv4 hosts with
+	// no prior contact, so it carries its own token bucket (eifLim) — the
+	// ICMP error limiter covers only error translations.
+	if !s.eifLim.allowBudget(time.Now(), eifRatePerSec, eifBurst) {
+		if lg != nil {
+			lg.Debugf("NAT64 UDP(EIF) inject to %s.%d from %s:%d rate-limited",
+				net.IP(bk.srcAddr[:]).String(), bk.srcPort, raddr.IP.String(), raddr.Port)
+		}
+		return
+	}
 	var srcV4 [4]byte
 	copy(srcV4[:], raddr.IP.To4())
 	src6 := s.pref64.Embed(net.IP(srcV4[:])).To16()

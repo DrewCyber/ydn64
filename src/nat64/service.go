@@ -90,6 +90,11 @@ type Service struct {
 	// errLim rate-limits every synthesised ICMPv6 error (translated v4-side
 	// errors and generated Destination Unreachables alike).
 	errLim errRateLimiter
+	// eifLim rate-limits unsolicited datagrams injected under
+	// endpoint-independent filtering (RFC 4787 REQ-8) — the one outbound
+	// synthesis path any IPv4 host can reach without prior contact, once it
+	// knows or brute-forces a mapped ip:port.
+	eifLim errRateLimiter
 	// logger is the service log target captured at Start; packet-path hooks
 	// (the NIC interceptor runs without arguments) use it for debug lines.
 	logger atomic.Pointer[log.Logger]
