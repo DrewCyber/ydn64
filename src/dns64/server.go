@@ -190,7 +190,12 @@ func NewService(cfg config.DNS64Config, allowedSources []string, ignoredDstSubne
 
 	p := &proxy{
 		cache: newCache(expDur, purgeDur, cfg.MaxCacheEntries),
-		ns:    ns,
+	}
+	// Assign only when non-nil: proxy.ns is an interface, and storing a
+	// typed-nil *YggdrasilNetstack inside it would defeat the nil check in
+	// lookupUpstream (a 200::/7 forwarder would then panic on dial).
+	if ns != nil {
+		p.ns = ns
 	}
 	excludedAAAA := config.ParseIPNets(cfg.ExcludedAAAASubnets)
 	p.reload(cfg.Default, ia, buildZones(cfg.Zones), config.ParseIPNets(ignoredDstSubnets), excludedAAAA)
@@ -629,7 +634,10 @@ func (s *Service) serveTCPConn(conn net.Conn, logger *log.Logger) {
 			defer handlers.Done()
 			defer func() { <-slots }()
 
-			resp := s.proxy.handle(req)
+			// RFC 7766 §8.2: the query arrived over TCP, so the upstream
+			// exchange uses TCP too — complete answers instead of UDP-sized
+			// or TC-flagged ones.
+			resp := s.proxy.handleVia(req, "tcp")
 			// Same EDNS(0) normalisation as the UDP path; the negotiated
 			// UDP size does not constrain TCP messages (RFC 6891 §6.2.1),
 			// so the returned limit is ignored here.

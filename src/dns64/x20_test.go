@@ -101,7 +101,7 @@ func TestX20MismatchedAnswerRejected(t *testing.T) {
 	// coincidentally being all-lowercase are ~2^-21 — deterministic enough.
 	errs := 0
 	for i := 0; i < 3; i++ {
-		if _, err := p.lookup(u.addr, x20Req("FORGERY.CaseCheck.Example.COM.")); err == nil {
+		if _, err := p.lookup(u.addr, x20Req("FORGERY.CaseCheck.Example.COM."), viaUDP); err == nil {
 			t.Fatal("canonicalised answer accepted despite 0x20 mismatch")
 		} else {
 			errs++
@@ -121,7 +121,7 @@ func TestX20EchoedAnswerAcceptedAndRestored(t *testing.T) {
 	p := &proxy{}
 	const orig = "Client.Case.Example.COM."
 
-	resp, err := p.lookup(u.addr, x20Req(orig))
+	resp, err := p.lookup(u.addr, x20Req(orig), viaUDP)
 	if err != nil {
 		t.Fatalf("lookup against echoing upstream failed: %v", err)
 	}
@@ -143,39 +143,49 @@ func TestX20EchoedAnswerAcceptedAndRestored(t *testing.T) {
 
 // TestX20DisablesAfterStrikesAndRecovers exercises the graceful degradation:
 // after x20MaxConsecutiveFailures consecutive mismatches, lookups toward that
-// forwarder succeed again (unrandomised), stay working for the disable window,
-// and randomisation resumes once it elapses.
+// forwarder succeed again (unrandomised), stay working for the disable window
+// (a successful lookup must not re-enable randomisation early), and
+// randomisation resumes once the window elapses.
+//
+// The window's edges are pinned directly on the state instead of derived
+// from a short artificial duration: an 80 ms-style fake window made the
+// mid-window probes race the wall clock — under -race with the full suite
+// running, the round trips following the strike loop could legitimately
+// outlive the window and spuriously fail.
 func TestX20DisablesAfterStrikesAndRecovers(t *testing.T) {
-	origDur := x20DisableDuration
-	origMax := x20MaxConsecutiveFailures
-	x20DisableDuration = 80 * time.Millisecond
-	defer func() {
-		x20DisableDuration = origDur
-		x20MaxConsecutiveFailures = origMax
-	}()
-
 	u := newX20Upstream(t)
 	u.setMode("canonical")
 	p := &proxy{}
 
 	for i := 0; i < x20MaxConsecutiveFailures; i++ {
-		if _, err := p.lookup(u.addr, x20Req("Strike.Out.EXAMPLE.COM.")); err == nil {
+		if _, err := p.lookup(u.addr, x20Req("Strike.Out.EXAMPLE.COM."), viaUDP); err == nil {
 			t.Fatalf("strike %d unexpectedly succeeded", i+1)
 		}
 	}
-	// Disabled: no randomisation, canonical answer accepted.
-	if _, err := p.lookup(u.addr, x20Req("While.Disabled.EXAMPLE.COM.")); err != nil {
+	st := p.x20StateFor(u.addr)
+
+	// Inside the window (pinned wide open): no randomisation, canonical
+	// answer accepted.
+	st.mu.Lock()
+	st.disabledUntil = time.Now().Add(time.Minute)
+	st.mu.Unlock()
+	if _, err := p.lookup(u.addr, x20Req("While.Disabled.EXAMPLE.COM."), viaUDP); err != nil {
 		t.Fatalf("lookup during disable window failed: %v", err)
 	}
-	// Still inside the window after a success.
-	if _, err := p.lookup(u.addr, x20Req("Still.Disabled.EXAMPLE.COM.")); err != nil {
-		t.Fatalf("lookup still inside disable window failed: %v", err)
+	// The success above must NOT re-enable randomisation early.
+	st.mu.Lock()
+	reEnabled := time.Now().After(st.disabledUntil)
+	st.mu.Unlock()
+	if reEnabled {
+		t.Fatal("a successful unrandomised lookup re-enabled 0x20 randomisation inside the disable window")
 	}
 
 	// Window elapsed: randomisation resumes; a correct echo server passes.
-	time.Sleep(x20DisableDuration + 30*time.Millisecond)
+	st.mu.Lock()
+	st.disabledUntil = time.Now().Add(-time.Second)
+	st.mu.Unlock()
 	u.setMode("echo")
-	if _, err := p.lookup(u.addr, x20Req("Back.On.ECHO.COM.")); err != nil {
+	if _, err := p.lookup(u.addr, x20Req("Back.On.ECHO.COM."), viaUDP); err != nil {
 		t.Fatalf("lookup after disable window failed: %v", err)
 	}
 }

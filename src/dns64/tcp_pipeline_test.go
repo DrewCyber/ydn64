@@ -20,8 +20,10 @@ func pipelineLogger() *log.Logger {
 	return log.New(io.Discard, "", 0)
 }
 
-// startPipelineTestUpstream runs a mock upstream UDP DNS server on loopback
-// whose answers are instant except for names carrying a "slow." first label,
+// startPipelineTestUpstream runs a mock upstream DNS server on loopback
+// answering on BOTH UDP and TCP (RFC 7766 §8.2: ydn64 mirrors a TCP client
+// query's transport toward upstreams, so the mock must accept both) whose
+// answers are instant except for names carrying a "slow." first label,
 // which are delayed by slowDelay before replying (both for the AAAA query
 // handleAAAA issues first and for its follow-up A lookup). A queries get a
 // deterministic A record derived from the name so synthesis results are
@@ -29,32 +31,40 @@ func pipelineLogger() *log.Logger {
 // fall-through to A-based synthesis.
 func startPipelineTestUpstream(t *testing.T, slowDelay time.Duration) string {
 	t.Helper()
+	handler := dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
+		resp := new(dns.Msg)
+		resp.SetReply(req)
+		if len(req.Question) == 1 && strings.HasPrefix(strings.ToLower(req.Question[0].Name), "slow.") {
+			time.Sleep(slowDelay)
+		}
+		if len(req.Question) == 1 && req.Question[0].Qtype == dns.TypeA {
+			// Stable per-name address in TEST-NET-3 (203.0.113/24).
+			sum := byte(0)
+			for _, c := range []byte(strings.ToLower(req.Question[0].Name)) {
+				sum += c
+			}
+			rr, _ := dns.NewRR(fmt.Sprintf("%s 300 IN A 203.0.113.%d", req.Question[0].Name, sum))
+			resp.Answer = append(resp.Answer, rr)
+		}
+		_ = w.WriteMsg(resp)
+	})
+
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("failed to listen UDP: %v", err)
 	}
-	server := &dns.Server{
-		PacketConn: pc,
-		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
-			resp := new(dns.Msg)
-			resp.SetReply(req)
-			if len(req.Question) == 1 && strings.HasPrefix(strings.ToLower(req.Question[0].Name), "slow.") {
-				time.Sleep(slowDelay)
-			}
-			if len(req.Question) == 1 && req.Question[0].Qtype == dns.TypeA {
-				// Stable per-name address in TEST-NET-3 (203.0.113/24).
-				sum := byte(0)
-				for _, c := range []byte(strings.ToLower(req.Question[0].Name)) {
-					sum += c
-				}
-				rr, _ := dns.NewRR(fmt.Sprintf("%s 300 IN A 203.0.113.%d", req.Question[0].Name, sum))
-				resp.Answer = append(resp.Answer, rr)
-			}
-			_ = w.WriteMsg(resp)
-		}),
+	ln, err := net.Listen("tcp", pc.LocalAddr().String())
+	if err != nil {
+		t.Fatalf("failed to listen TCP: %v", err)
 	}
-	go func() { _ = server.ActivateAndServe() }()
-	t.Cleanup(func() { _ = server.Shutdown() })
+	udpServer := &dns.Server{PacketConn: pc, Handler: handler}
+	tcpServer := &dns.Server{Listener: ln, Handler: handler}
+	go func() { _ = udpServer.ActivateAndServe() }()
+	go func() { _ = tcpServer.ActivateAndServe() }()
+	t.Cleanup(func() {
+		_ = udpServer.Shutdown()
+		_ = tcpServer.Shutdown()
+	})
 	return pc.LocalAddr().String()
 }
 

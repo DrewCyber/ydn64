@@ -13,9 +13,23 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
-
-	"github.com/DrewCyber/ydn64/src/netstack"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
+
+// Client-facing transports, used both as the upstream dns.Client network and
+// as the gonet dial family for Yggdrasil-native forwarders.
+const (
+	viaUDP = "udp"
+	viaTCP = "tcp"
+)
+
+// netstackDialer is the slice of *netstack.YggdrasilNetstack the proxy dials
+// Yggdrasil-native (200::/7) forwarders through. Declared as an interface so
+// tests can install a bare gVisor stack without an attached Yggdrasil core;
+// *netstack.YggdrasilNetstack satisfies it implicitly.
+type netstackDialer interface {
+	Stack() *stack.Stack
+}
 
 // x20MaxConsecutiveFailures and x20DisableDuration shape the graceful
 // degradation of RFC 5452 §9.1 0x20 name randomisation: after this many
@@ -72,7 +86,7 @@ type proxyConfig struct {
 type proxy struct {
 	cache *dnsCache
 	cfg   atomic.Pointer[proxyConfig]
-	ns    *netstack.YggdrasilNetstack // used to dial Yggdrasil-native (200::/7) forwarders
+	ns    netstackDialer // used to dial Yggdrasil-native (200::/7) forwarders
 
 	// static holds the Dns64Static exact-name table (name → literal IP).
 	// It lives in its own atomic slot rather than inside proxyConfig because
@@ -209,9 +223,10 @@ var ipv4OnlyARPAIPs = []net.IP{
 	net.ParseIP("192.0.0.171"),
 }
 
-// lookup performs a UDP DNS query and returns the response. Forwarders in
-// the Yggdrasil address range (200::/7) are dialled through the embedded
-// gVisor netstack; everything else uses the host OS network stack.
+// lookup performs a DNS query toward the given forwarder over transport via
+// ("udp" or "tcp") and returns the response. Forwarders in the Yggdrasil
+// address range (200::/7) are dialled through the embedded gVisor netstack;
+// everything else uses the host OS network stack.
 //
 // Two independent forgery defences wrap every upstream exchange (RFC 5452):
 //
@@ -230,7 +245,13 @@ var ipv4OnlyARPAIPs = []net.IP{
 //     Forwarders that keep failing the echo check are treated as 0x20-
 //     incapable and temporarily exempted (see x20State), trading the
 //     hardening for availability instead of failing every lookup.
-func (p *proxy) lookup(server string, req *dns.Msg) (*dns.Msg, error) {
+//
+// Additionally, a UDP exchange answered with TC=1 (the upstream could not
+// fit its reply in one datagram) is retried once over TCP: the complete
+// answer is handed to the caller, which truncates it to the client's own
+// negotiated limits — so clients with buffers larger than the upstream's
+// UDP view still receive their data instead of a truncated dead end.
+func (p *proxy) lookup(server string, req *dns.Msg, via string) (*dns.Msg, error) {
 	origID := req.Id
 	req.Id = dns.Id()
 	defer func() { req.Id = origID }()
@@ -245,7 +266,12 @@ func (p *proxy) lookup(server string, req *dns.Msg) (*dns.Msg, error) {
 		defer func() { req.Question[0].Name = origName }()
 	}
 
-	resp, err := p.lookupUpstream(server, req)
+	resp, err := p.lookupUpstream(server, req, via)
+	if err == nil && resp != nil && via != viaTCP && resp.Truncated {
+		if full, tcpErr := p.lookupUpstream(server, req, viaTCP); tcpErr == nil && full != nil && !full.Truncated {
+			resp = full
+		}
+	}
 	if resp != nil {
 		resp.Id = origID
 	}
@@ -293,24 +319,26 @@ func randomizeNameCase(name string) string {
 	return string(b)
 }
 
-// lookupUpstream sends req to the configured forwarder unchanged.
-func (p *proxy) lookupUpstream(server string, req *dns.Msg) (*dns.Msg, error) {
+// lookupUpstream sends req to the configured forwarder unchanged, over the
+// given transport ("udp" or "tcp").
+func (p *proxy) lookupUpstream(server string, req *dns.Msg, via string) (*dns.Msg, error) {
 	host, _, err := net.SplitHostPort(server)
 	if err == nil {
 		if ip := net.ParseIP(host); ip != nil && p.ns != nil && yggdrasilRange.Contains(ip) {
-			return p.lookupViaNetstack(server, ip, req)
+			return p.lookupViaNetstack(server, ip, req, via)
 		}
 	}
 
-	c := &dns.Client{Net: "udp", Timeout: 5 * time.Second}
+	c := &dns.Client{Net: via, Timeout: 5 * time.Second}
 	resp, _, err := c.Exchange(req, server)
 	return resp, err
 }
 
 // lookupViaNetstack dials the forwarder through the embedded gVisor stack
 // (the same one connected to the Yggdrasil Core), since Yggdrasil-native
-// addresses aren't reachable via the host OS network stack.
-func (p *proxy) lookupViaNetstack(server string, ip net.IP, req *dns.Msg) (*dns.Msg, error) {
+// addresses aren't reachable via the host OS network stack. The dial family
+// and dns.Client transport follow via (RFC 7766 §8.2).
+func (p *proxy) lookupViaNetstack(server string, ip net.IP, req *dns.Msg, via string) (*dns.Msg, error) {
 	_, portStr, err := net.SplitHostPort(server)
 	if err != nil {
 		return nil, err
@@ -325,6 +353,20 @@ func (p *proxy) lookupViaNetstack(server string, ip net.IP, req *dns.Msg) (*dns.
 		Addr: tcpip.AddrFromSlice(ip.To16()),
 		Port: uint16(port),
 	}
+
+	if via == viaTCP {
+		conn, dialErr := gonet.DialTCP(p.ns.Stack(), *raddr, ipv6.ProtocolNumber)
+		if dialErr != nil {
+			return nil, fmt.Errorf("dialling %s via yggdrasil netstack: %w", server, dialErr)
+		}
+		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+		c := &dns.Client{Net: viaTCP}
+		resp, _, err := c.ExchangeWithConn(req, &dns.Conn{Conn: conn})
+		return resp, err
+	}
+
 	conn, tcpErr := gonet.DialUDP(p.ns.Stack(), nil, raddr, ipv6.ProtocolNumber)
 	if tcpErr != nil {
 		return nil, fmt.Errorf("dialling %s via yggdrasil netstack: %w", server, tcpErr)
@@ -332,7 +374,7 @@ func (p *proxy) lookupViaNetstack(server string, ip net.IP, req *dns.Msg) (*dns.
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
-	c := &dns.Client{Net: "udp"}
+	c := &dns.Client{Net: viaUDP}
 	resp, _, err := c.ExchangeWithConn(req, &dns.Conn{Conn: conn})
 	return resp, err
 }
@@ -357,8 +399,18 @@ func dnssecValidatingClient(req *dns.Msg) bool {
 	return opt != nil && opt.Do()
 }
 
-// handle processes a single DNS request and returns a response message.
+// handle processes a single DNS request that arrived over UDP and returns a
+// response message.
 func (p *proxy) handle(req *dns.Msg) *dns.Msg {
+	return p.handleVia(req, viaUDP)
+}
+
+// handleVia processes a single DNS request arriving over transport via
+// ("udp" or "tcp") and returns a response message. The upstream transport
+// toward forwarders follows via (RFC 7766 §8.2: a resolver that accepts a
+// query over TCP should also use TCP toward upstreams), so TCP clients get
+// complete answers instead of UDP-sized or truncated ones.
+func (p *proxy) handleVia(req *dns.Msg, via string) *dns.Msg {
 	if len(req.Question) == 0 {
 		resp := new(dns.Msg)
 		resp.SetRcode(req, dns.RcodeFormatError)
@@ -404,7 +456,7 @@ func (p *proxy) handle(req *dns.Msg) *dns.Msg {
 	proxied := false
 
 	if q.Qclass != dns.ClassINET {
-		resp, err = p.passThrough(req, server)
+		resp, err = p.passThrough(req, server, via)
 	} else {
 		switch q.Qtype {
 		case dns.TypeAAAA:
@@ -413,16 +465,16 @@ func (p *proxy) handle(req *dns.Msg) *dns.Msg {
 				// (CD=1 && DO=1) gets the upstream answer verbatim — no
 				// synthesis, no filtering, no cache.
 				proxied = true
-				resp, err = p.passThrough(req, server)
+				resp, err = p.passThrough(req, server, via)
 			} else {
-				resp, err = p.handleAAAA(req, &q, z, server)
+				resp, err = p.handleAAAA(req, &q, z, server, via)
 			}
 		case dns.TypeANY:
 			if dnssecValidatingClient(req) {
 				// Validating clients must not receive synthesised data; relay
 				// the ANY query itself instead of rewriting it to AAAA.
 				proxied = true
-				resp, err = p.passThrough(req, server)
+				resp, err = p.passThrough(req, server, via)
 			} else {
 				// ydn64 only ever serves IPv6-only clients, so a raw ANY answer
 				// containing real A records would be unusable to them anyway.
@@ -437,17 +489,17 @@ func (p *proxy) handle(req *dns.Msg) *dns.Msg {
 				// upstream ANY query instead of triggering real AAAA synthesis.
 				aaaaQ := q
 				aaaaQ.Qtype = dns.TypeAAAA
-				resp, err = p.handleAAAA(req, &aaaaQ, z, server)
+				resp, err = p.handleAAAA(req, &aaaaQ, z, server, via)
 				if resp != nil {
 					resp.Question[0].Qtype = dns.TypeANY
 				}
 			}
 		case dns.TypeA:
-			resp, err = p.handleA(req, &q, z, server)
+			resp, err = p.handleA(req, &q, z, server, via)
 		case dns.TypePTR:
-			resp, err = p.handlePTR(req, &q, z, server)
+			resp, err = p.handlePTR(req, &q, z, server, via)
 		default:
-			resp, err = p.passThrough(req, server)
+			resp, err = p.passThrough(req, server, via)
 		}
 	}
 
@@ -470,7 +522,7 @@ func (p *proxy) handle(req *dns.Msg) *dns.Msg {
 //  1. Check cache.
 //  2. Query upstream for AAAA — pass through real AAAA if zone.returnIPv6Addresses.
 //  3. If no usable AAAA, query A and synthesise from prefix (if configured).
-func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string) (*dns.Msg, error) {
+func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string, via string) (*dns.Msg, error) {
 	// Intercept ipv4only.arpa. queries and answer locally per RFC 7050 & RFC 8880.
 	if strings.ToLower(q.Name) == "ipv4only.arpa." {
 		resp := new(dns.Msg)
@@ -521,7 +573,7 @@ func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string
 		req.CopyTo(upReq)
 		upReq.Question = []dns.Question{*q}
 		var err error
-		upResp, err = p.lookup(server, upReq)
+		upResp, err = p.lookup(server, upReq, via)
 		if err != nil {
 			return nil, err
 		}
@@ -576,7 +628,7 @@ func (p *proxy) handleAAAA(req *dns.Msg, q *dns.Question, z *zone, server string
 	aReq := new(dns.Msg)
 	req.CopyTo(aReq)
 	aReq.Question = []dns.Question{{Name: q.Name, Qtype: dns.TypeA, Qclass: q.Qclass}}
-	aResp, err := p.lookup(server, aReq)
+	aResp, err := p.lookup(server, aReq, via)
 	if err != nil {
 		return nil, err
 	}
@@ -786,7 +838,7 @@ func (p *proxy) synthesiseFromA(rrs []dns.RR, fallbackName string, z *zone, maxT
 }
 
 // handleA returns A records only if zone.returnIPv4Addresses is set.
-func (p *proxy) handleA(req *dns.Msg, q *dns.Question, z *zone, server string) (*dns.Msg, error) {
+func (p *proxy) handleA(req *dns.Msg, q *dns.Question, z *zone, server string, via string) (*dns.Msg, error) {
 	// Intercept ipv4only.arpa. queries and answer locally per RFC 8880.
 	if strings.ToLower(q.Name) == "ipv4only.arpa." {
 		resp := new(dns.Msg)
@@ -806,7 +858,7 @@ func (p *proxy) handleA(req *dns.Msg, q *dns.Question, z *zone, server string) (
 	upReq := new(dns.Msg)
 	req.CopyTo(upReq)
 	upReq.Question = []dns.Question{*q}
-	resp, err := p.lookup(server, upReq)
+	resp, err := p.lookup(server, upReq, via)
 	if err != nil {
 		return nil, err
 	}
@@ -818,7 +870,7 @@ func (p *proxy) handleA(req *dns.Msg, q *dns.Question, z *zone, server string) (
 
 // handlePTR reverses a pool6::IPv4 PTR query back to a real IPv4 PTR query.
 // For PTR queries that don't fall in the pool6 range, pass through.
-func (p *proxy) handlePTR(req *dns.Msg, q *dns.Question, z *zone, server string) (*dns.Msg, error) {
+func (p *proxy) handlePTR(req *dns.Msg, q *dns.Question, z *zone, server string, via string) (*dns.Msg, error) {
 	// Try to find a zone with a prefix; if we can reverse-map the PTR to IPv4
 	// via that prefix, rewrite the query.
 	ipv4, matched := p.reversePTR(q.Name)
@@ -832,7 +884,7 @@ func (p *proxy) handlePTR(req *dns.Msg, q *dns.Question, z *zone, server string)
 		req.CopyTo(upReq)
 		origQuestion := upReq.Question
 		upReq.Question = []dns.Question{{Name: realPTR, Qtype: dns.TypePTR, Qclass: q.Qclass}}
-		resp, err := p.lookup(server, upReq)
+		resp, err := p.lookup(server, upReq, via)
 		if err != nil {
 			return nil, err
 		}
@@ -852,7 +904,7 @@ func (p *proxy) handlePTR(req *dns.Msg, q *dns.Question, z *zone, server string)
 		resp.Question[0].Qtype = dns.TypePTR
 		return resp, nil
 	}
-	return p.passThrough(req, server)
+	return p.passThrough(req, server, via)
 }
 
 // reversePTR checks whether the PTR name (e.g. "1.0.0.0.f.f.0.0...ip6.arpa.")
@@ -917,8 +969,8 @@ func nibbleVal(c byte) int {
 }
 
 // passThrough forwards the request as-is and returns the upstream response.
-func (p *proxy) passThrough(req *dns.Msg, server string) (*dns.Msg, error) {
+func (p *proxy) passThrough(req *dns.Msg, server string, via string) (*dns.Msg, error) {
 	upReq := new(dns.Msg)
 	req.CopyTo(upReq)
-	return p.lookup(server, upReq)
+	return p.lookup(server, upReq, via)
 }
