@@ -177,6 +177,32 @@ only the mechanics that matter when changing code:
   service `Drain`), a configurable TCP keepalive window, and hot-path
   optimisations gated on profiling. Revisit on demand. Protocol-conformance
   status lives ONLY in RFCs.txt above.
+- The code review of 2026-08-24 (formerly `context/code-review-2026-08-24.md`)
+  is CLOSED and the file removed: all 17 findings fixed on 2026-08-25 (git
+  history documents each fix; commits `0ace043`…`4365ca9`). Remaining
+  deliberate deferrals / follow-up ideas:
+  - TCP_USER_TIMEOUT on NAT64's OS-dialled IPv4 leg: `net.KeepAliveConfig`
+    has no such field (Go 1.25); would need build-tagged raw setsockopt.
+    Count-based keepalive detection (~165 s) covers idle-dead peers; only
+    stalled-transfer aborts still rely on OS retransmission defaults.
+  - Fuzz targets for the untrusted-input parsers (`parseIPv6HeaderChain`,
+    `interceptPacket`, `parseICMPv4InnerPacket`, `ptrToIPv6`,
+    `ParsePref64`/Extract) — pure functions over bytes, ~30 lines each;
+    run on demand, not in CI.
+  - Black-box case for half-idle TCP teardown (dead v4 peer frees slots in
+    minutes) needs a controllable IPv4 sink container; the harness topology
+    deliberately has none. Revisit with any topology extension.
+  - Optional observability ideas (never findings): surface `nicCtrlDrops`
+    in the periodic stats line; a tiny opt-in Prometheus exporter.
+
+  Library gotchas learned while fixing #1–#3 that aren't obvious from the
+  diffs: miekg/dns's `Server.ActivateAndServe` serves PacketConn XOR
+  Listener — dual-transport test mocks need two `dns.Server` instances
+  sharing one handler; gologme disables warn/error/etc. by default, so
+  tests capturing warnings must call `EnableLevel("warn")`; and don't pin
+  short artificial time windows in tests asserted against wall-clock
+  behaviour — under `-race` with the full suite running they get outlived
+  legitimately (pin state directly instead).
 
 
 ## Changelog
