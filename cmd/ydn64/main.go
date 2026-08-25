@@ -53,11 +53,18 @@ func splitEnvList(v string) []string {
 func setLogLevel(loglevel string, logger *log.Logger) {
 	levels := [...]string{"error", "warn", "info", "debug", "trace"}
 	idx := 2 // default: info
+	matched := false
 	for k, v := range levels {
 		if v == loglevel {
 			idx = k
+			matched = true
 			break
 		}
+	}
+	if !matched && loglevel != "" {
+		// Printf passes unconditionally (no level gating yet), so the
+		// operator sees the typo instead of silently getting info.
+		logger.Printf("unknown -loglevel %q, using \"info\"", loglevel)
 	}
 	for k, v := range levels {
 		if k <= idx {
@@ -377,6 +384,8 @@ func main() {
 			logger.Warnf("admin stop: %v", err)
 		}
 	}
+	// Core.Stop() returns nothing (it shuts down listeners and peers
+	// internally); multicast/admin above are the fallible stops.
 	n.core.Stop()
 	logger.Println("stopped")
 }
@@ -420,6 +429,14 @@ func reloadConfig(
 
 	newNat64Cfg := appCfg.NAT64()
 	newDNS64Cfg := appCfg.DNS64()
+
+	// Same loud deny-all warning the startup path emits: an emptied
+	// AllowedSources is valid but denies everything, and a reload must not
+	// apply that silently.
+	if len(appCfg.AllowedSources) == 0 {
+		logger.Warnf("AllowedSources is EMPTY after reload: NAT64 and DNS64 will deny EVERY source. " +
+			"Add your clients' Yggdrasil addresses or subnets to AllowedSources (see README, section Configuration).")
+	}
 
 	if newNat64Cfg.Enable != runningNat64Cfg.Enable {
 		logger.Warnf("config reload: Nat64Enable change (%v → %v) requires a restart, ignoring", runningNat64Cfg.Enable, newNat64Cfg.Enable)

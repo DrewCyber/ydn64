@@ -273,6 +273,14 @@ func (e *YggdrasilNIC) writePacket(pkt *stack.PacketBuffer) (retErr tcpip.Error)
 	if err != nil {
 		return &tcpip.ErrAborted{}
 	}
+	// vv.Read silently stops at len(buf): an egress frame larger than the
+	// configured MTU buffer would be cut without any error. gVisor segments
+	// before egress given the NIC's MTU, so this should be unreachable —
+	// surface it loudly instead of corrupting frames invisibly if a future
+	// change breaks that invariant.
+	if n == len(buf) && vv.Size() > 0 {
+		e.netstack.logfLocked("yggdrasil NIC egress frame truncated (%d bytes pending beyond %d-byte buffer)", vv.Size()+n, len(buf))
+	}
 	if _, err := e.rwc.Write(buf[:n]); err != nil {
 		return &tcpip.ErrAborted{}
 	}

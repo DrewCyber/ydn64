@@ -60,3 +60,51 @@ func TestReloadConfigWarnsOnRestartRequiredCapacitySettings(t *testing.T) {
 		t.Errorf("Nat64MaxTCPConnections warned despite matching value:\n%s", out)
 	}
 }
+
+// TestSetLogLevelWarnsOnUnknownLevel pins the code-review-2026-08-24 #12 fix:
+// an unrecognised -loglevel value is announced instead of silently meaning
+// info. Printf passes gologme's level gating, so the warning is always
+// visible regardless of the level being configured.
+func TestSetLogLevelWarnsOnUnknownLevel(t *testing.T) {
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+
+	setLogLevel("verbose", logger)
+	if !strings.Contains(buf.String(), `unknown -loglevel "verbose"`) {
+		t.Errorf("missing unknown-level warning; got:\n%s", buf.String())
+	}
+
+	buf.Reset()
+	setLogLevel("debug", logger) // known values stay silent
+	if buf.Len() != 0 {
+		t.Errorf("known level produced output:\n%s", buf.String())
+	}
+}
+
+// TestReloadConfigWarnsWhenAllowedSourcesEmptied pins the code-review-
+// 2026-08-24 #16 fix: the loud deny-all warning the startup path emits must
+// repeat on SIGHUP when a reload applies an emptied AllowedSources list.
+func TestReloadConfigWarnsWhenAllowedSourcesEmptied(t *testing.T) {
+	dir := filepath.Join("..", "..", "tmp")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	confPath := filepath.Join(dir, "ydn64-reload-empty-sources.conf")
+	conf := "{ Nat64Enable: false }"
+	if err := os.WriteFile(confPath, []byte(conf), 0o644); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+	defer os.Remove(confPath)
+
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+	logger.EnableLevel("warn")
+
+	reloadConfig(confPath, logger, nil,
+		config.NAT64Config{Enable: false}, nil, config.DNS64Config{})
+
+	out := buf.String()
+	if !strings.Contains(out, "AllowedSources is EMPTY after reload") {
+		t.Errorf("reload applied an emptied AllowedSources silently; got:\n%s", out)
+	}
+}

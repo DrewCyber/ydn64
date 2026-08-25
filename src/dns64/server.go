@@ -651,6 +651,11 @@ func (s *Service) serveTCPConn(conn net.Conn, logger *log.Logger) {
 // DNS-over-TCP connection readers, and their per-query pipelining
 // goroutines) to finish, or until d elapses — used
 // during shutdown so cancellation doesn't cut answers mid-flight.
+//
+// The watcher goroutine outlives Drain when the deadline fires: it keeps
+// waiting on s.wg until the last in-flight query finishes. That leak is
+// bounded (one goroutine per Drain call, released as soon as work drains)
+// and benign — nothing references it after process shutdown begins.
 func (s *Service) Drain(d time.Duration) {
 	done := make(chan struct{})
 	go func() {

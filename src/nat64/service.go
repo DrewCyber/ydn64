@@ -332,6 +332,11 @@ func (s *Service) interceptPacket(pkt []byte) bool {
 // connections (RFC 5382 REQ-5) and ICMP echo sessions, and tears down the
 // raw ICMP socket on shutdown.
 func (s *Service) cleanupSessions(ctx context.Context) {
+	// The interval is computed from the startup timeouts only: icmpSession-
+	// Timeout is a package constant (60s → 30s floor) that currently
+	// dominates, so a live-reloaded shorter UDP/TCP timeout just means its
+	// expiry waits at most one extra tick. Revisit only if the ICMP timeout
+	// ever becomes configurable.
 	interval := icmpSessionTimeout / 2
 	if t := s.udpTimeout(); t > 0 && t/2 < interval {
 		interval = t / 2

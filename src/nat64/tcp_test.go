@@ -2,6 +2,7 @@ package nat64
 
 import (
 	"context"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -284,5 +285,101 @@ func TestReloadUpdatesTCPTimeout(t *testing.T) {
 	}, []string{"200::/7"}, nil)
 	if got := s.tcpTimeout(); got != 8000*time.Second {
 		t.Errorf("tcpTimeout after Reload = %v, want 8000s", got)
+	}
+}
+
+// TestProxyTCPPreservesHalfClose pins the code-review-2026-08-24 #8 fix: a
+// clean EOF on one leg must half-close that direction (CloseWrite) instead of
+// tearing down both legs, so protocols relying on shutdown-write-then-read
+// keep working through the translator.
+func TestProxyTCPPreservesHalfClose(t *testing.T) {
+	// makeLeg builds one loopback TCP pair: `proxyEnd` is what proxyTCP
+	// sees, `peer` is the remote endpoint (client or server) in the test.
+	makeLeg := func(t *testing.T) (proxyEnd, peer net.Conn) {
+		t.Helper()
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		defer ln.Close()
+
+		type result struct {
+			c   net.Conn
+			err error
+		}
+		accepted := make(chan result, 1)
+		go func() {
+			c, err := ln.Accept()
+			accepted <- result{c, err}
+		}()
+
+		peer, err = net.DialTimeout("tcp4", ln.Addr().String(), 5*time.Second)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { peer.Close() })
+
+		res := <-accepted
+		if res.err != nil {
+			t.Fatalf("accept: %v", res.err)
+		}
+		return res.c, peer
+	}
+
+	clientEnd, clientPeer := makeLeg(t)
+	serverEnd, serverPeer := makeLeg(t)
+
+	go proxyTCP(clientEnd, serverEnd)
+	t.Cleanup(func() { clientEnd.Close(); serverEnd.Close() })
+
+	// Client sends data then half-closes its write side.
+	if _, err := clientPeer.Write([]byte("hello")); err != nil {
+		t.Fatalf("client write: %v", err)
+	}
+	if tcp, ok := clientPeer.(*net.TCPConn); ok {
+		if err := tcp.CloseWrite(); err != nil {
+			t.Fatalf("client CloseWrite: %v", err)
+		}
+	}
+
+	// Server reads the data, then must observe a clean EOF — proof the
+	// half-close crossed both copy loops instead of closing the leg.
+	buf := make([]byte, 5)
+	if _, err := io.ReadFull(serverPeer, buf); err != nil {
+		t.Fatalf("server read: %v", err)
+	}
+	if string(buf) != "hello" {
+		t.Fatalf("server read %q, want %q", buf, "hello")
+	}
+	_ = serverPeer.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if n, err := serverPeer.Read(buf); n != 0 || err != io.EOF {
+		t.Fatalf("server read after client EOF = (%d, %v), want (0, io.EOF)", n, err)
+	}
+
+	// The reverse direction must still be open: the server replies now.
+	if _, err := serverPeer.Write([]byte("world")); err != nil {
+		t.Fatalf("server write after receiving EOF: %v", err)
+	}
+	if tcp, ok := serverPeer.(*net.TCPConn); ok {
+		if err := tcp.CloseWrite(); err != nil {
+			t.Fatalf("server CloseWrite: %v", err)
+		}
+	}
+
+	// Client receives the reply and then its own clean EOF.
+	_ = clientPeer.SetReadDeadline(time.Now().Add(5 * time.Second))
+	out := make([]byte, 0, 5)
+	for len(out) < len("world") {
+		n, err := clientPeer.Read(buf)
+		out = append(out, buf[:n]...)
+		if err != nil {
+			t.Fatalf("client read: %v (after %q)", err, out)
+		}
+	}
+	if string(out) != "world" {
+		t.Fatalf("client read %q, want %q", out, "world")
+	}
+	if n, err := clientPeer.Read(buf); n != 0 || err != io.EOF {
+		t.Fatalf("client read after server EOF = (%d, %v), want (0, io.EOF)", n, err)
 	}
 }

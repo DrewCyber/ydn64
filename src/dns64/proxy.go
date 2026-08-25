@@ -148,12 +148,24 @@ func (p *proxy) lookupStatic(name string) (net.IP, bool) {
 
 // staticAnswer builds the local authoritative response for a name present in
 // Dns64Static, or nil when this query is not served statically (non-IN
-// class, non-A/AAAA type, or unknown name). A v4 value answers A queries,
-// a v6 value answers AAAA queries — exactly as configured, with no NAT64
-// synthesis; a query for the other family gets NODATA (empty NOERROR),
-// because the name exists but has no record of that type.
+// class, non-A/AAAA type — ANY counts as AAAA, see below — or unknown name).
+// A v4 value answers A queries; a v6 value answers AAAA queries — exactly as
+// configured, with no NAT64 synthesis; a query for the other family gets
+// NODATA (empty NOERROR), because the name exists but has no record of that
+// type.
 func (p *proxy) staticAnswer(req *dns.Msg, q *dns.Question) *dns.Msg {
-	if q.Qclass != dns.ClassINET || (q.Qtype != dns.TypeA && q.Qtype != dns.TypeAAAA) {
+	if q.Qclass != dns.ClassINET {
+		return nil
+	}
+	// ANY on a statically-served name is answered as AAAA (mirroring the
+	// ANY→AAAA rewrite the zone path applies): ydn64 serves IPv6-only
+	// clients, so local authoritative data must answer its IPv6 view rather
+	// than falling through to zones/upstream where the record doesn't exist.
+	qtype := q.Qtype
+	if qtype == dns.TypeANY {
+		qtype = dns.TypeAAAA
+	}
+	if qtype != dns.TypeA && qtype != dns.TypeAAAA {
 		return nil
 	}
 	ip, ok := p.lookupStatic(q.Name)
@@ -165,11 +177,11 @@ func (p *proxy) staticAnswer(req *dns.Msg, q *dns.Question) *dns.Msg {
 	resp.Response = true
 
 	isV4 := ip.To4() != nil
-	familyMatches := (q.Qtype == dns.TypeA) == isV4
+	familyMatches := (qtype == dns.TypeA) == isV4
 	if familyMatches {
 		qt := "A"
 		val := ip.To4().String()
-		if q.Qtype == dns.TypeAAAA {
+		if qtype == dns.TypeAAAA {
 			qt = "AAAA"
 			val = ip.String()
 		}
@@ -391,6 +403,13 @@ func (p *proxy) getForwarder(z *zone) string {
 // OK (DO) and Checking Disabled (CD) bits — i.e. the client performs DNSSEC
 // validation itself and must receive upstream data unsynthesised
 // (RFC 6147 §5.5, implementing the RFC 4033–4035 requirements).
+//
+// The check deliberately requires BOTH bits, although §5.5's literal wording
+// keys off CD alone: a CD-without-DO query is legal but vanishingly rare in
+// practice (real validators set DO), and loosening would expose the synthesis
+// path to clients that merely disable checking without validating anything.
+// Requiring DO keeps the no-synthesis guarantee scoped to clients that have
+// actually opted into DNSSEC data.
 func dnssecValidatingClient(req *dns.Msg) bool {
 	if !req.CheckingDisabled {
 		return false

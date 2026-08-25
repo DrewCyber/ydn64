@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -481,5 +482,41 @@ func TestUDPBufPoolRecycles(t *testing.T) {
 	}
 	if &buf[0] != &next[0] {
 		t.Log("pool handed out a different backing array (valid but means GC ran between Get calls)")
+	}
+}
+
+// TestDemuxAddressDependentPicksMostRecentFlow pins the code-review-2026-08-24
+
+// #13 fix: under address-dependent filtering, a datagram from an unmatched
+// port of a known server IP must deterministically reach the
+// most-recently-active flow toward that IP — not whichever flow Go's
+// randomized map iteration happens to visit first.
+func TestDemuxAddressDependentPicksMostRecentFlow(t *testing.T) {
+	svc := &Service{}
+	svc.settings.Store(&nat64Settings{udpFiltering: filterAddressDependent})
+
+	serverIP := [4]byte{203, 0, 113, 7}
+	old := &udpSession{dstAddr: serverIP, lastSeenNs: 1000}
+	recent := &udpSession{dstAddr: serverIP, lastSeenNs: 5000}
+
+	bib := &udpBIB{}
+	bib.flows.Store(v4Tuple{addr: serverIP, port: 1111}, old)
+	bib.flows.Store(v4Tuple{addr: serverIP, port: 2222}, recent)
+
+	raddr := &net.UDPAddr{IP: net.IP(serverIP[:]).To4(), Port: 3333}
+	for i := 0; i < 20; i++ {
+		if got := svc.demuxUDPReply(bib, raddr, nil); got != recent {
+			t.Fatalf("iteration %d demuxed to %+v, want the most-recently-active flow", i, got)
+		}
+	}
+	if got := svc.demuxUDPReply(bib, &net.UDPAddr{IP: net.IP(serverIP[:]).To4(), Port: 2222}, nil); got != recent {
+		t.Fatal("exact-tuple match did not win over address-dependent fallback")
+	}
+
+	// A stale flow never wins while a fresher one exists.
+	atomic.StoreInt64(&old.lastSeenNs, 9000)
+	atomic.StoreInt64(&recent.lastSeenNs, 100)
+	if got := svc.demuxUDPReply(bib, raddr, nil); got != old {
+		t.Fatal("demux ignored recency update")
 	}
 }

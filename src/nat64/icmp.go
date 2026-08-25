@@ -2,7 +2,9 @@ package nat64
 
 import (
 	"encoding/binary"
+	"errors"
 	"net"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -319,7 +321,14 @@ func (s *Service) icmpReplyLoop(logger *log.Logger) {
 			if s.icmpClosed.Load() {
 				return
 			}
-			continue // timeout or transient error — keep polling
+			// The 1s deadline bounds idle polling, but an error that is NOT
+			// the deadline returns instantly — a persistent one would turn
+			// this loop into a hot spin. Brief back-off on those; deadline
+			// expiries keep their full-rate polling.
+			if !errors.Is(err, os.ErrDeadlineExceeded) {
+				time.Sleep(100 * time.Millisecond)
+			}
+			continue
 		}
 		if n < 8 {
 			continue

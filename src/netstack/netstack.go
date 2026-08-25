@@ -136,6 +136,12 @@ func CreateYdn64Netstack(ygg *core.Core, ifMTU uint64, pool6CIDR string) (*Yggdr
 			TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocolCUBIC, udp.NewProtocol, icmp.NewProtocol6},
 		}),
 	}
+	// Pre-wire the stderr fallback immediately: the read loop starts inside
+	// NewYggdrasilNIC below, while main wires SuperviseReadLoop (which
+	// replaces this with the service logger) only after further startup
+	// steps. Without it, the earliest read errors would be silently dropped
+	// instead of going to stderr (visible via `podman logs`).
+	s.logf = func(format string, args ...interface{}) { log.Printf(format, args...) }
 
 	if tcpErr := s.NewYggdrasilNIC(ygg, ifMTU); tcpErr != nil {
 		return nil, fmt.Errorf("creating Yggdrasil NIC: %s", tcpErr.String())

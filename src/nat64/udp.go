@@ -673,7 +673,11 @@ func (s *Service) injectUnsolicitedUDP(bk bibKey, raddr *net.UDPAddr, payload []
 //     is dropped (the pre-EIM connected-socket semantics).
 //   - address-dependent (default): a datagram from any port of an IPv4
 //     address this BIB has an active flow toward is accepted and delivered
-//     into that flow's session.
+//     into that flow's session. When several flows share the server IP
+//     (different ports), the most-recently-active one wins — deterministic,
+//     unlike Go's randomized map iteration, and the best guess for which
+//     flow the sender is actually talking to (e.g. a server replying from a
+//     new source port right after the client contacted it).
 //
 // A datagram matching no flow at all is dropped in every mode EXCEPT
 // endpoint-independent filtering, where udpReplyLoop injects it onto the
@@ -689,11 +693,14 @@ func (s *Service) demuxUDPReply(bib *udpBIB, raddr *net.UDPAddr, lg *log.Logger)
 
 	if s.settings.Load().udpFiltering == filterAddressDependent {
 		var candidate *udpSession
+		var candidateSeen int64
 		bib.flows.Range(func(_, v any) bool {
 			sess := v.(*udpSession)
 			if sess.dstAddr == ip4 {
-				candidate = sess
-				return false
+				seen := atomic.LoadInt64(&sess.lastSeenNs)
+				if candidate == nil || seen > candidateSeen {
+					candidate, candidateSeen = sess, seen
+				}
 			}
 			return true
 		})

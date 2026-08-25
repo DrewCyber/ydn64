@@ -242,3 +242,45 @@ func TestParseStaticEntriesSkipsGarbage(t *testing.T) {
 		t.Errorf("good.test = %v", ip)
 	}
 }
+
+// TestStaticServesANYAsAAAA pins the code-review-2026-08-24 #15 fix: an
+// ANY-type query for a statically-served name must be answered locally (as
+// its AAAA view, mirroring the ANY→AAAA rewrite the zone path applies)
+// instead of falling through to zone logic and the upstream forwarder, where
+// the literal record does not exist.
+func TestStaticServesANYAsAAAA(t *testing.T) {
+	up := newCountingUpstream(t)
+	p := &proxy{cache: newCache(300*time.Second, 600*time.Second, 0)}
+	p.reload(up.addr, IAIgnore, []zone{
+		{domains: []string{"."}, prefix: testPref64()},
+	}, nil, nil)
+	p.setStatic(map[string]string{
+		"v6any.test.": "2001:db8::77",
+		"v4any.test.": "203.0.113.9",
+	})
+
+	// v6 static entry: ANY returns the AAAA record locally.
+	resp := p.handle(queryReq("v6any.test.", dns.TypeANY))
+	if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 1 {
+		t.Fatalf("ANY v6 static: rcode %d, %d answers — not served from static",
+			resp.Rcode, len(resp.Answer))
+	}
+	if aaaa, ok := resp.Answer[0].(*dns.AAAA); !ok || aaaa.AAAA.String() != "2001:db8::77" {
+		t.Errorf("ANY v6 static: got %T %v, want AAAA 2001:db8::77", resp.Answer[0], resp.Answer[0])
+	}
+
+	// v4-only static entry under ANY: NODATA (an IPv6-only client cannot use
+	// A data), but still local — never forwarded.
+	resp = p.handle(queryReq("v4any.test.", dns.TypeANY))
+	if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 0 {
+		t.Errorf("ANY v4-only static: rcode %d, %d answers, want local NODATA",
+			resp.Rcode, len(resp.Answer))
+	}
+	up.mustBeUntouched(t, "ANY queries on static names")
+
+	// Unknown names keep falling through to the zone/upstream path.
+	resp = p.handle(queryReq("notstatic.test.", dns.TypeANY))
+	if len(resp.Answer) == 0 {
+		t.Fatal("ANY for unknown name no longer reaches the synthesising zone")
+	}
+}

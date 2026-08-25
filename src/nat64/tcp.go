@@ -127,6 +127,16 @@ func (c *activityConn) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// CloseWrite delegates the half-close so proxyTCP's EOF handling can reach
+// through the activity-tracking wrapper; unsupported underlying conns are a
+// no-op (proxyTCP falls back to a full close there).
+func (c *activityConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
 // trackTCP registers a freshly dialled proxied connection for idle expiry
 // and returns its pair handle.
 func (s *Service) trackTCP(a, b net.Conn, label string) *tcpPair {
@@ -280,13 +290,25 @@ func (s *Service) handleTCP(req *tcp.ForwarderRequest, logger *log.Logger) {
 }
 
 // proxyTCP copies data bidirectionally between two net.Conn until both
-// directions reach EOF.  Each half-close triggers closure of that direction.
+// directions reach EOF. A clean EOF on one direction half-closes it
+// (CloseWrite toward the peer, preserving protocols that rely on
+// shutdown-write-then-read semantics); a hard error tears that leg down as
+// before. Both legs are TCP conns (gonet and *net.TCPConn), so the assertion
+// succeeds in practice; anything else falls back to a full close.
 func proxyTCP(a, b net.Conn) {
 	done := make(chan struct{}, 2)
 	cp := func(dst, src net.Conn) {
-		io.Copy(dst, src) //nolint:errcheck
+		defer func() { done <- struct{}{} }()
+		_, err := io.Copy(dst, src)
+		if err == nil || err == io.EOF {
+			// Half-close: signal EOF downstream without killing traffic
+			// still flowing the other way.
+			if cw, ok := dst.(interface{ CloseWrite() error }); ok {
+				cw.CloseWrite()
+				return
+			}
+		}
 		dst.Close()
-		done <- struct{}{}
 	}
 	go cp(a, b)
 	go cp(b, a)
