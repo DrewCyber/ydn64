@@ -66,6 +66,28 @@ func applyTCPKeepalive(ep tcpip.Endpoint) tcpip.Error {
 	return ep.SetSockOpt(&userTimeout)
 }
 
+// applyTCPOSKeepalive mirrors applyTCPKeepalive's dead-peer budget on the
+// OS-dialled IPv4 leg. Without it the socket runs system defaults (Go enables
+// keepalives at a 15 s idle, but interval/count stay OS-dependent — roughly
+// 11+ minutes on Linux), so an IPv4 peer that vanishes silently mid-idle
+// would pin its global and per-source slots until Nat64TcpTimeout (2h04m at
+// the default) instead of being detected in about:
+//
+//	tcpKeepaliveIdle + tcpKeepaliveCount × tcpKeepaliveInterval ≈ 165s
+//
+// net.KeepAliveConfig has no user-timeout knob, so the stalled-transfer
+// coverage the gVisor leg gets from TCPUserTimeoutOption has no stdlib
+// equivalent here; Count-based probing covers the idle-dead-peer case this
+// exists for. Failures are non-fatal, matching applyTCPKeepalive.
+func applyTCPOSKeepalive(conn *net.TCPConn) error {
+	return conn.SetKeepAliveConfig(net.KeepAliveConfig{
+		Enable:   true,
+		Idle:     tcpKeepaliveIdle,
+		Interval: tcpKeepaliveInterval,
+		Count:    tcpKeepaliveCount,
+	})
+}
+
 // tcpPair tracks one proxied NAT64 TCP connection (both legs) for idle
 // expiry (RFC 5382 REQ-5). lastSeenNs is refreshed by every successful
 // payload transfer in either direction. Pure ACKs — including the TCP
@@ -243,6 +265,11 @@ func (s *Service) handleTCP(req *tcp.ForwarderRequest, logger *log.Logger) {
 			return
 		}
 		defer conn4.Close()
+		if tcp4, ok := conn4.(*net.TCPConn); ok {
+			if err := applyTCPOSKeepalive(tcp4); err != nil {
+				logger.Debugf("NAT64 TCP keepalive setup for %s (IPv4 leg): %v", dstAddr, err)
+			}
+		}
 
 		pair := s.trackTCP(yggConn, conn4, fmt.Sprintf("%s → %s", srcIP, dstAddr))
 		defer s.untrackTCP(pair)

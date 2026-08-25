@@ -80,6 +80,56 @@ func TestApplyTCPKeepalive(t *testing.T) {
 	}
 }
 
+// TestApplyTCPOSKeepalive verifies the OS-side IPv4 leg gets the same
+// dead-peer budget as the gVisor leg (code-review-2026-08-24 #3): the config
+// applies cleanly to a real TCPConn. Reading the underlying socket options
+// back would require per-platform getsockopt calls, so this pins the
+// non-fatal contract plus the budget arithmetic instead.
+func TestApplyTCPOSKeepalive(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	type acceptResult struct {
+		conn *net.TCPConn
+		err  error
+	}
+	accepted := make(chan acceptResult, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			accepted <- acceptResult{nil, err}
+			return
+		}
+		accepted <- acceptResult{c.(*net.TCPConn), nil}
+	}()
+
+	dialed, err := net.DialTimeout("tcp4", ln.Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer dialed.Close()
+	tcp4 := dialed.(*net.TCPConn)
+
+	if err := applyTCPOSKeepalive(tcp4); err != nil {
+		t.Fatalf("applyTCPOSKeepalive: %v", err)
+	}
+
+	res := <-accepted
+	if res.err != nil {
+		t.Fatalf("accept: %v", res.err)
+	}
+	defer res.conn.Close()
+
+	// Detection budget sanity: identical to the gVisor leg's ≈165s.
+	want := tcpKeepaliveIdle + time.Duration(tcpKeepaliveCount)*tcpKeepaliveInterval
+	if want > 3*time.Minute {
+		t.Errorf("OS-leg dead-peer detection budget = %v; slots would outlive reasonable reaping", want)
+	}
+}
+
 // newTCPTimeoutService builds a Service with the given proxied-TCP idle
 // timeout in seconds. NewService takes raw values without running
 // AppConfig.Validate, so sub-floor values can be injected for fast tests.
