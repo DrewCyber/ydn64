@@ -388,11 +388,12 @@ func main() {
 // Yggdrasil core/netstack.
 //
 // Fields that are NOT reloadable this way — because they'd require
-// recreating the gVisor NIC/routes, rebinding sockets, or reconstructing the
-// Yggdrasil core's identity/peers/listeners — are: PrivateKey, Peers,
-// InterfacePeers, Listen, MulticastInterfaces, NodeInfo(Privacy),
-// AllowedPublicKeys, GroupPassword, Nat64Enable, Nat64Pool, Dns64Enable,
-// Dns64Listen. If any
+// recreating the gVisor NIC/routes, rebinding sockets, reconstructing the
+// Yggdrasil core's identity/peers/listeners, or re-sizing semaphores built at
+// construction — are: PrivateKey, Peers, InterfacePeers, Listen,
+// MulticastInterfaces, NodeInfo(Privacy), AllowedPublicKeys, GroupPassword,
+// Nat64Enable, Nat64Pool, Nat64MaxTCPConnections, Dns64Enable, Dns64Listen,
+// Dns64MaxConcurrentQueries. If any
 // of those differ from the running config, a warning is logged and the
 // change is ignored; a full restart is required to apply them.
 func reloadConfig(
@@ -431,6 +432,14 @@ func reloadConfig(
 	}
 	if newDNS64Cfg.Listen != runningDNS64Cfg.Listen {
 		logger.Warnf("config reload: Dns64Listen change (%q → %q) requires a restart, ignoring", runningDNS64Cfg.Listen, newDNS64Cfg.Listen)
+	}
+	// Both concurrency ceilings are sem-sized at service construction, so a
+	// reloaded value cannot take effect; warn instead of silently ignoring.
+	if newNat64Cfg.MaxTCPClients != runningNat64Cfg.MaxTCPClients {
+		logger.Warnf("config reload: Nat64MaxTCPConnections change (%d → %d) requires a restart, ignoring", runningNat64Cfg.MaxTCPClients, newNat64Cfg.MaxTCPClients)
+	}
+	if newDNS64Cfg.MaxQueries != runningDNS64Cfg.MaxQueries {
+		logger.Warnf("config reload: Dns64MaxConcurrentQueries change (%d → %d) requires a restart, ignoring", runningDNS64Cfg.MaxQueries, newDNS64Cfg.MaxQueries)
 	}
 
 	// Apply DNS64 first: its Reload can reject a bad new config, and failing

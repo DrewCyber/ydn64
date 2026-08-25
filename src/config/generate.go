@@ -262,7 +262,8 @@ func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string, peers, allowed
 
 	sb.WriteString("  # Maximum number of concurrently proxied NAT64 TCP connections.\n")
 	sb.WriteString("  # Excess connections are refused until existing ones close.\n")
-	sb.WriteString("  # Applied at startup; changing this value requires a restart.\n")
+	sb.WriteString("  # Applied at startup; changing this value requires a restart\n")
+	sb.WriteString("  # (a SIGHUP reload warns and keeps the running value).\n")
 	sb.WriteString("  Nat64MaxTCPConnections: 1024\n\n")
 
 	sb.WriteString("  # Maximum number of tracked NAT64 UDP sessions; when full, the\n")
@@ -293,7 +294,8 @@ func buildConf(privKeyHex, nodeIP, pool6CIDR, pool6Prefix string, peers, allowed
 	sb.WriteString("  # Maximum number of concurrent DNS64 queries in flight (UDP query\n")
 	sb.WriteString("  # goroutines + DNS-over-TCP connections). Excess UDP queries are\n")
 	sb.WriteString("  # answered with SERVFAIL immediately and excess TCP connections are\n")
-	sb.WriteString("  # closed. Applied at startup; changing it requires a restart.\n")
+	sb.WriteString("  # closed. Applied at startup; changing it requires a restart\n")
+	sb.WriteString("  # (a SIGHUP reload warns and keeps the running value).\n")
 	sb.WriteString("  Dns64MaxConcurrentQueries: 512\n\n")
 
 	sb.WriteString("  # Per-client DNS64 query rate limit in queries per second (RFC 5358:\n")
